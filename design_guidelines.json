@@ -1,0 +1,91 @@
+{
+  "theme": "Light",
+  "archetype": "1 (Organic & Earthy)",
+  "color_palette": {
+    "background": {
+      "primary": "#FDFBF7",
+      "secondary": "#F3F0EA",
+      "card": "#FFFFFF"
+    },
+    "text": {
+      "primary": "#23211F",
+      "secondary": "#5C5852",
+      "muted": "#8A857D"
+    },
+    "brand": {
+      "primary": "#C65D47",
+      "primary_hover": "#A64A36",
+      "secondary": "#7A8B76",
+      "accent": "#E6B89C"
+    },
+    "status": {
+      "success": "#7A8B76",
+      "error": "#B84A4A",
+      "warning": "#D4A373",
+      "info": "#6C8A9C"
+    },
+    "border": "#E6E2D8"
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Manrope, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    },
+    "sizes": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight",
+      "h3": "text-xl sm:text-2xl",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "label": "text-xs uppercase tracking-[0.2em] font-medium"
+    }
+  },
+  "spacing_and_layout": {
+    "generous_padding": true,
+    "grid_system": "Dashboard Mode: grid-cols-1 md:grid-cols-3 lg:grid-cols-4 with gap-6",
+    "card_padding": "p-6 md:p-8",
+    "surface_strategy": "Neumorphism & Grid Borders. Flat solid cards with 1px subtle border (#E6E2D8). NO heavy drop shadows. Sharp or slightly rounded corners (max rounded-md)."
+  },
+  "components": {
+    "button": "bg-[#C65D47] text-white hover:bg-[#A64A36] rounded-md transition-transform hover:-translate-y-0.5 shadow-sm px-6 py-3",
+    "card": "bg-white border border-[#E6E2D8] rounded-md shadow-sm hover:shadow-md transition-shadow",
+    "input": "border border-[#E6E2D8] bg-white rounded-md px-4 py-2 focus:ring-2 focus:ring-[#C65D47]/20 focus:border-[#C65D47]",
+    "badge": "uppercase tracking-widest text-[10px] px-2 py-1 rounded-sm bg-[#7A8B76]/10 text-[#7A8B76] font-bold"
+  },
+  "motion_and_interactions": {
+    "hover_states": "Hovering on interactive elements translates Y by -2px, slight increase in shadow depth.",
+    "page_transitions": "Fade in with slight upward motion (framer-motion).",
+    "micro_interactions": "Checkboxes/Radios have a distinct scale-in animation when selected."
+  },
+  "assets": {
+    "icons": "lucide-react (default)",
+    "image_urls": [
+      {
+        "url": "https://images.pexels.com/photos/21628869/pexels-photo-21628869.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "hero_background",
+        "description": "Vintage anatomy charts displayed in a medical room, used for empty states or welcome dashboard background with overlay."
+      },
+      {
+        "url": "https://images.pexels.com/photos/30133402/pexels-photo-30133402.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "study_illustration",
+        "description": "Human anatomical model photo. Can be used in practice mode empty state or hero section."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1691935444011-6dc287f96586?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwyfHxtZWRpY2FsJTIwc3R1ZGVudCUyMHN0dWR5aW5nJTIwYW5hdG9teXxlbnwwfHx8fDE3Nzg1OTg5MDZ8MA&ixlib=rb-4.1.0&q=85",
+        "category": "lifestyle",
+        "description": "Student studying, use in the 'About' or 'Welcome' screen to set the mood."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a robust Spanish UI (hybrid fullstack app) using .js/.jsx files.",
+    "Use Manrope for headings and IBM Plex Sans for body text.",
+    "Dashboard should focus on clean data visualization: # of topics, total questions, accuracy rate.",
+    "Implement file upload feature clearly on the dashboard (PDF to AI questions).",
+    "Use standard Shadcn components for complex interactions but strip Vercel-look. Apply our organic earthy color palette.",
+    "Provide a 'Modo Examen' (timed) and 'Modo Práctica' (untimed, instant feedback).",
+    "Use border-[#E6E2D8] and subtle shadows. Don't use heavy box-shadows. The app should feel like a premium medical journal.",
+    "Add data-testid attributes to all interactive elements for testing."
+  ]
+}
