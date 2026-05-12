@@ -165,7 +165,34 @@ CONTENIDO DE LAS DIAPOSITIVAS:
         system_message=system_msg,
     ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
-    response = await chat.send_message(UserMessage(text=user_prompt))
+    # Retry on transient upstream failures (502/504/timeouts)
+    import asyncio as _asyncio
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = await chat.send_message(UserMessage(text=user_prompt))
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            msg = str(e).lower()
+            is_transient = any(
+                k in msg
+                for k in ("502", "503", "504", "bad gateway", "timeout", "overloaded", "rate limit", "429")
+            )
+            logger.warning("Claude call failed (attempt %s/3): %s", attempt + 1, e)
+            if not is_transient or attempt == 2:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "El servicio de IA está temporalmente saturado. "
+                        "Vuelve a intentarlo en unos segundos. "
+                        f"(Detalle: {str(e)[:160]})"
+                    ),
+                ) from e
+            await _asyncio.sleep(2 ** attempt)
+    else:
+        raise HTTPException(status_code=502, detail=f"Fallo al llamar a la IA: {last_err}")
+
     raw = _strip_code_fences(response)
 
     # Find JSON array in response if Claude added prose
