@@ -9,7 +9,6 @@ import {
     Check,
     Sparkles,
     FileText,
-    RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -21,7 +20,8 @@ import {
     deleteQuestion,
     deletePdf,
 } from "@/lib/api";
-import RegenerateDialog from "@/components/RegenerateDialog";
+import GenerateDialog from "@/components/GenerateDialog";
+import AddPdfDialog from "@/components/AddPdfDialog";
 
 export default function TopicDetail() {
     const { id } = useParams();
@@ -29,7 +29,9 @@ export default function TopicDetail() {
     const [questions, setQuestions] = useState([]);
     const [pdfs, setPdfs] = useState([]);
     const [filter, setFilter] = useState("all");
-    const [regenPdf, setRegenPdf] = useState(null);
+    const [genOpen, setGenOpen] = useState(false);
+    const [genDefault, setGenDefault] = useState(null);
+    const [addOpen, setAddOpen] = useState(false);
 
     const load = async () => {
         try {
@@ -126,10 +128,34 @@ export default function TopicDetail() {
 
             {/* PDFs section */}
             <section className="mb-8">
-                <span className="label-eyebrow block mb-3">Fuentes PDF</span>
+                <div className="flex items-center justify-between mb-3">
+                    <span className="label-eyebrow">Fuentes PDF</span>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setAddOpen(true)}
+                            data-testid="add-pdf-btn"
+                            className="px-3 py-1.5 rounded-md border text-xs font-medium flex items-center gap-1 hover:bg-[color:var(--bg-secondary)]"
+                            style={{ borderColor: "var(--border)" }}
+                        >
+                            <Plus className="w-3.5 h-3.5" /> Añadir PDF
+                        </button>
+                        <button
+                            onClick={() => {
+                                setGenDefault(null);
+                                setGenOpen(true);
+                            }}
+                            disabled={pdfs.length === 0}
+                            data-testid="generate-questions-btn"
+                            className="btn-primary text-xs flex items-center gap-1"
+                            style={{ padding: "0.4rem 0.8rem" }}
+                        >
+                            <Sparkles className="w-3.5 h-3.5" /> Generar preguntas
+                        </button>
+                    </div>
+                </div>
                 {pdfs.length === 0 ? (
                     <div className="card-organic p-5 text-sm" style={{ color: "var(--text-muted)" }}>
-                        No hay PDFs guardados (las preguntas se generaron antes de añadir esta funcionalidad).
+                        Aún no hay PDFs en este tema. Pulsa "Añadir PDF" para subir el primero.
                     </div>
                 ) : (
                     <div className="space-y-2">
@@ -159,12 +185,15 @@ export default function TopicDetail() {
                                 </div>
                                 <div className="flex gap-1">
                                     <button
-                                        onClick={() => setRegenPdf(p)}
-                                        data-testid={`regen-${p.id}`}
-                                        className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 text-white"
-                                        style={{ background: subjectColor }}
+                                        onClick={() => {
+                                            setGenDefault([p.id]);
+                                            setGenOpen(true);
+                                        }}
+                                        data-testid={`gen-from-${p.id}`}
+                                        className="px-2.5 py-1.5 rounded-md text-xs font-medium hover:bg-[color:var(--bg-secondary)]"
+                                        style={{ color: subjectColor }}
                                     >
-                                        <RefreshCw className="w-3.5 h-3.5" /> Generar más
+                                        Generar de este
                                     </button>
                                     <button
                                         onClick={() => removePdf(p.id)}
@@ -307,11 +336,19 @@ export default function TopicDetail() {
                 )}
             </div>
 
-            <RegenerateDialog
-                open={!!regenPdf}
-                pdf={regenPdf}
-                onClose={() => setRegenPdf(null)}
+            <GenerateDialog
+                open={genOpen}
+                topic={topic}
+                pdfs={pdfs}
+                defaultSelected={genDefault}
+                onClose={() => setGenOpen(false)}
                 onDone={load}
+            />
+            <AddPdfDialog
+                open={addOpen}
+                topicId={topic.id}
+                onClose={() => setAddOpen(false)}
+                onUploaded={load}
             />
         </div>
     );

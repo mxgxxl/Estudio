@@ -638,6 +638,94 @@ async def delete_pdf(pdf_id: str):
     return {"ok": True}
 
 
+@api.post("/topics/{topic_id}/pdfs/upload")
+async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
+    """Add a new PDF to an existing topic WITHOUT generating questions immediately."""
+    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan ficheros PDF")
+    pdf_bytes = await file.read()
+    try:
+        text = extract_pdf_text(pdf_bytes)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Error al leer el PDF: {e}") from e
+    if len(text) < 200:
+        raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
+    pdf_source = PdfSource(
+        topic_id=topic_id,
+        filename=file.filename,
+        text=text,
+        char_count=len(text),
+    )
+    await db.pdfs.insert_one(pdf_source.model_dump())
+    return {
+        "id": pdf_source.id,
+        "topic_id": topic_id,
+        "filename": pdf_source.filename,
+        "char_count": pdf_source.char_count,
+        "created_at": pdf_source.created_at,
+        "question_count": 0,
+    }
+
+
+class GenerateFromPdfsReq(BaseModel):
+    pdf_ids: List[str]
+    num_questions: int = 10
+    question_type: Literal["mcq", "tf"] = "mcq"
+    num_options: int = 3
+
+
+@api.post("/topics/{topic_id}/generate")
+async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
+    """Generate questions for a topic by combining text from selected PDFs."""
+    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    if not req.pdf_ids:
+        raise HTTPException(status_code=400, detail="Selecciona al menos un PDF")
+    if req.num_questions < 3 or req.num_questions > 80:
+        raise HTTPException(status_code=400, detail="num_questions debe estar entre 3 y 80")
+
+    pdfs = await db.pdfs.find(
+        {"id": {"$in": req.pdf_ids}, "topic_id": topic_id}, {"_id": 0}
+    ).to_list(100)
+    if not pdfs:
+        raise HTTPException(status_code=404, detail="No se encontraron PDFs")
+
+    # Combine PDF texts with clear separators
+    parts = []
+    for p in pdfs:
+        parts.append(f"=== Fuente: {p['filename']} ===\n{p['text']}")
+    combined = "\n\n".join(parts)
+
+    nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
+    generated = await generate_questions_with_claude(
+        topic["name"], combined, req.num_questions, question_type=req.question_type, num_options=nopts
+    )
+
+    primary_pdf_id = pdfs[0]["id"]
+    docs = []
+    for g in generated:
+        q = Question(
+            topic_id=topic_id,
+            topic_name=topic["name"],
+            subject_id=topic.get("subject_id"),
+            pdf_source_id=primary_pdf_id,
+            question_type=g["question_type"],
+            num_options=g["num_options"],
+            question=g["question"],
+            options=g["options"],
+            correct_index=g["correct_index"],
+            explanation=g.get("explanation", ""),
+        )
+        docs.append(q.model_dump())
+    if docs:
+        await db.questions.insert_many(docs)
+    return {"questions_created": len(docs), "pdf_ids_used": [p["id"] for p in pdfs]}
+
+
 # ---- Questions ----
 @api.post("/questions/{question_id}/favorite")
 async def toggle_favorite(question_id: str):

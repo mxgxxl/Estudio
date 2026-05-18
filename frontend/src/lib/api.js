@@ -32,6 +32,15 @@ export const uploadTopic = (subjectId, formData) =>
 export const regenerateFromPdf = (pdfId, payload) =>
     api.post(`/pdfs/${pdfId}/regenerate`, payload, { timeout: 300000 }).then((r) => r.data);
 export const deletePdf = (pdfId) => api.delete(`/pdfs/${pdfId}`).then((r) => r.data);
+export const addPdfToTopic = (topicId, formData) =>
+    api
+        .post(`/topics/${topicId}/pdfs/upload`, formData, {
+            headers: { "Content-Type": "multipart/form-data" },
+            timeout: 120000,
+        })
+        .then((r) => r.data);
+export const generateFromTopicPdfs = (topicId, payload) =>
+    api.post(`/topics/${topicId}/generate`, payload, { timeout: 300000 }).then((r) => r.data);
 
 // Questions
 export const toggleFavorite = (qid) => api.post(`/questions/${qid}/favorite`).then((r) => r.data);
