@@ -415,10 +415,13 @@ async def update_subject(subject_id: str, req: SubjectUpdate):
 
 @api.delete("/subjects/{subject_id}")
 async def delete_subject(subject_id: str):
+    # Collect topic ids first so we can cascade pdfs properly
+    topic_ids = [t["id"] async for t in db.topics.find({"subject_id": subject_id}, {"_id": 0, "id": 1})]
     res = await db.subjects.delete_one({"id": subject_id})
     await db.topics.delete_many({"subject_id": subject_id})
     await db.questions.delete_many({"subject_id": subject_id})
-    await db.pdfs.delete_many({"topic_id": {"$in": []}})  # no-op
+    if topic_ids:
+        await db.pdfs.delete_many({"topic_id": {"$in": topic_ids}})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     return {"ok": True}
