@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, ChevronRight, Flag, Star, AlertCircle, Clock } from "lucide-react";
+import { Check, X, ChevronRight, Flag, Star, AlertCircle, Clock, MinusCircle } from "lucide-react";
 import { toast } from "sonner";
 import { quizSubmit, toggleFavorite as apiFav, toggleDifficult as apiDiff } from "@/lib/api";
 
@@ -22,8 +22,8 @@ export default function QuizRun() {
     const navigate = useNavigate();
     const [quiz, setQuiz] = useState(null);
     const [idx, setIdx] = useState(0);
-    const [answers, setAnswers] = useState([]); // per question selected index
-    const [revealed, setRevealed] = useState(false); // practice mode
+    const [answers, setAnswers] = useState([]);
+    const [revealed, setRevealed] = useState(false);
     const [elapsed, setElapsed] = useState(0);
     const startedRef = useRef(Date.now());
     const submittedRef = useRef(false);
@@ -53,6 +53,41 @@ export default function QuizRun() {
         return Math.max(0, quiz.time_limit_seconds - elapsed);
     }, [quiz, elapsed]);
 
+    const handleSubmit = async () => {
+        if (submittedRef.current) return;
+        submittedRef.current = true;
+        try {
+            const payload = {
+                mode: quiz.mode,
+                subject_ids: quiz.subject_ids || [],
+                topic_ids: quiz.topic_ids || [],
+                answers: quiz.questions.map((qq, i) => ({
+                    question_id: qq.id,
+                    selected: answers[i] ?? -1,
+                    correct_index: qq.correct_index,
+                })),
+                duration_seconds: Math.floor((Date.now() - startedRef.current) / 1000),
+                time_limit_seconds: quiz.time_limit_seconds || null,
+                penalty_factor: quiz.penalty_factor || null,
+                question_type: quiz.question_type || null,
+            };
+            const res = await quizSubmit(payload);
+            sessionStorage.setItem(
+                "quiz_result",
+                JSON.stringify({
+                    ...res,
+                    questions: quiz.questions,
+                    answers,
+                    mode: quiz.mode,
+                }),
+            );
+            navigate("/quiz/results");
+        } catch {
+            toast.error("Error al enviar el examen");
+            submittedRef.current = false;
+        }
+    };
+
     useEffect(() => {
         if (isExam && timeLeft === 0 && !submittedRef.current) {
             handleSubmit();
@@ -78,6 +113,13 @@ export default function QuizRun() {
         }
     };
 
+    const onClearAnswer = () => {
+        if (!isExam) return;
+        const next = [...answers];
+        next[idx] = -1;
+        setAnswers(next);
+    };
+
     const onNext = () => {
         if (idx + 1 >= quiz.questions.length) {
             handleSubmit();
@@ -91,38 +133,6 @@ export default function QuizRun() {
         if (idx > 0) {
             setIdx(idx - 1);
             setRevealed(isExam ? false : answers[idx - 1] !== -1);
-        }
-    };
-
-    const handleSubmit = async () => {
-        if (submittedRef.current) return;
-        submittedRef.current = true;
-        try {
-            const payload = {
-                mode: quiz.mode,
-                topic_ids: quiz.topic_ids || [],
-                answers: quiz.questions.map((qq, i) => ({
-                    question_id: qq.id,
-                    selected: answers[i] ?? -1,
-                    correct_index: qq.correct_index,
-                })),
-                duration_seconds: Math.floor((Date.now() - startedRef.current) / 1000),
-                time_limit_seconds: quiz.time_limit_seconds || null,
-            };
-            const res = await quizSubmit(payload);
-            sessionStorage.setItem(
-                "quiz_result",
-                JSON.stringify({
-                    ...res,
-                    questions: quiz.questions,
-                    answers,
-                    mode: quiz.mode,
-                }),
-            );
-            navigate("/quiz/results");
-        } catch (e) {
-            toast.error("Error al enviar el examen");
-            submittedRef.current = false;
         }
     };
 
@@ -146,6 +156,7 @@ export default function QuizRun() {
     };
 
     const answeredCount = answers.filter((a) => a !== -1).length;
+    const isTF = q.question_type === "tf";
 
     return (
         <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
@@ -164,10 +175,18 @@ export default function QuizRun() {
                     >
                         Salir
                     </button>
-                    <div className="flex items-center gap-3 text-sm">
+                    <div className="flex items-center gap-3 text-sm flex-wrap justify-end">
                         <span className="font-mono" data-testid="quiz-progress">
                             {idx + 1} / {quiz.questions.length}
                         </span>
+                        {quiz.penalty_factor && (
+                            <span
+                                className="font-mono text-xs px-2 py-1 rounded-md"
+                                style={{ background: "#fdf1ea", color: "var(--brand)" }}
+                            >
+                                −1/{quiz.penalty_factor}
+                            </span>
+                        )}
                         {isExam && timeLeft !== null && (
                             <span
                                 className="flex items-center gap-1 font-mono px-2 py-1 rounded-md"
@@ -202,7 +221,9 @@ export default function QuizRun() {
             <main className="flex-1 max-w-3xl mx-auto w-full px-5 py-8">
                 <div className="fade-up" key={idx}>
                     <div className="flex items-center justify-between mb-3">
-                        <span className="label-eyebrow">{q.topic_name}</span>
+                        <span className="label-eyebrow">
+                            {q.topic_name} · {isTF ? "Verdadero/Falso" : `Opción múltiple`}
+                        </span>
                         <div className="flex gap-1">
                             <button
                                 onClick={toggleFav}
@@ -234,7 +255,7 @@ export default function QuizRun() {
                         {q.question}
                     </h2>
 
-                    <div className="space-y-3 mb-6">
+                    <div className={`mb-6 ${isTF ? "grid grid-cols-2 gap-3" : "space-y-3"}`}>
                         {q.options.map((opt, i) => {
                             const isSelected = selected === i;
                             const isCorrect = i === q.correct_index;
@@ -262,7 +283,7 @@ export default function QuizRun() {
                                                 background: "white",
                                             }}
                                         >
-                                            {String.fromCharCode(65 + i)}
+                                            {isTF ? (i === 0 ? "V" : "F") : String.fromCharCode(65 + i)}
                                         </span>
                                         <span className="flex-1 text-sm md:text-base">{opt}</span>
                                         {revealed && isCorrect && (
@@ -276,6 +297,17 @@ export default function QuizRun() {
                             );
                         })}
                     </div>
+
+                    {isExam && selected !== -1 && quiz.penalty_factor && (
+                        <button
+                            onClick={onClearAnswer}
+                            data-testid="clear-answer-btn"
+                            className="text-xs flex items-center gap-1 mb-4 hover:underline"
+                            style={{ color: "var(--text-muted)" }}
+                        >
+                            <MinusCircle className="w-3 h-3" /> Dejar en blanco (no penaliza)
+                        </button>
+                    )}
 
                     {revealed && q.explanation && (
                         <div
@@ -313,7 +345,7 @@ export default function QuizRun() {
                                     data-testid="submit-exam-btn"
                                     className="btn-primary flex items-center gap-2 text-sm"
                                 >
-                                    Finalizar examen
+                                    Finalizar
                                 </button>
                             ) : (
                                 <button

@@ -1,54 +1,121 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
-import { Clock, Sparkles, Flame, Brain, Star, ArrowLeft, Play, Loader2 } from "lucide-react";
+import {
+    Clock,
+    Sparkles,
+    Flame,
+    Brain,
+    Star,
+    ArrowLeft,
+    Play,
+    Loader2,
+    AlertCircle,
+} from "lucide-react";
 import { toast } from "sonner";
-import { listTopics, quizStart } from "@/lib/api";
+import { listSubjects, listSubjectTopics, quizStart } from "@/lib/api";
 
 const MODES = [
     { id: "practice", label: "Práctica", icon: Sparkles, desc: "Sin tiempo, feedback inmediato" },
     { id: "exam", label: "Examen", icon: Clock, desc: "Con cronómetro y nota final" },
-    { id: "errors", label: "Errores", icon: Flame, desc: "Solo preguntas que has fallado" },
-    { id: "srs", label: "Repaso", icon: Brain, desc: "Lo que toca según la repetición espaciada" },
-    { id: "favorites", label: "Favoritas", icon: Star, desc: "Las preguntas marcadas como favoritas" },
+    { id: "errors", label: "Errores", icon: Flame, desc: "Solo preguntas falladas" },
+    { id: "srs", label: "Repaso", icon: Brain, desc: "Repetición espaciada" },
+    { id: "favorites", label: "Favoritas", icon: Star, desc: "Las marcadas" },
+];
+
+const QTYPES = [
+    { id: "any", label: "Cualquier tipo" },
+    { id: "mcq", label: "Opción múltiple" },
+    { id: "tf", label: "Verdadero/Falso" },
+];
+
+const PENALTIES = [
+    { id: 0, label: "Sin penalización" },
+    { id: 2, label: "2 mal = −1 bien" },
+    { id: 3, label: "3 mal = −1 bien" },
+    { id: 4, label: "4 mal = −1 bien" },
 ];
 
 export default function QuizSetup() {
     const navigate = useNavigate();
     const [params] = useSearchParams();
     const initialMode = params.get("mode") || "practice";
+    const initialSubject = params.get("subject");
     const initialTopic = params.get("topic");
 
-    const [topics, setTopics] = useState([]);
+    const [subjects, setSubjects] = useState([]);
+    const [allTopics, setAllTopics] = useState({}); // {subjectId: [topics]}
+    const [selectedSubjects, setSelectedSubjects] = useState(
+        new Set(initialSubject ? [initialSubject] : []),
+    );
+    const [selectedTopics, setSelectedTopics] = useState(
+        new Set(initialTopic ? [initialTopic] : []),
+    );
     const [mode, setMode] = useState(initialMode);
-    const [selected, setSelected] = useState(new Set(initialTopic ? [initialTopic] : []));
+    const [questionType, setQuestionType] = useState("any");
     const [numQuestions, setNumQuestions] = useState(15);
-    const [timeLimit, setTimeLimit] = useState(15); // minutes
+    const [timeLimit, setTimeLimit] = useState(15);
+    const [penalty, setPenalty] = useState(0);
     const [starting, setStarting] = useState(false);
 
     useEffect(() => {
-        listTopics().then(setTopics).catch(() => toast.error("Error cargando temas"));
+        listSubjects()
+            .then((subs) => {
+                setSubjects(subs);
+                // Load topics for each subject
+                return Promise.all(
+                    subs.map((s) =>
+                        listSubjectTopics(s.id).then((ts) => ({ id: s.id, topics: ts })),
+                    ),
+                );
+            })
+            .then((arr) => {
+                const map = {};
+                arr.forEach((x) => (map[x.id] = x.topics));
+                setAllTopics(map);
+            })
+            .catch(() => toast.error("Error cargando datos"));
     }, []);
 
-    const totalAvailable = useMemo(() => {
-        if (selected.size === 0) return topics.reduce((a, t) => a + t.question_count, 0);
-        return topics.filter((t) => selected.has(t.id)).reduce((a, t) => a + t.question_count, 0);
-    }, [selected, topics]);
-
-    const toggleTopic = (id) => {
-        const next = new Set(selected);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        setSelected(next);
+    // If user selects a subject, deselect specific topics from other subjects
+    const toggleSubject = (sid) => {
+        const next = new Set(selectedSubjects);
+        if (next.has(sid)) next.delete(sid);
+        else next.add(sid);
+        setSelectedSubjects(next);
     };
+
+    const toggleTopic = (tid) => {
+        const next = new Set(selectedTopics);
+        if (next.has(tid)) next.delete(tid);
+        else next.add(tid);
+        setSelectedTopics(next);
+    };
+
+    const visibleTopics = useMemo(() => {
+        if (selectedSubjects.size === 0) {
+            return Object.values(allTopics).flat();
+        }
+        return Object.entries(allTopics)
+            .filter(([sid]) => selectedSubjects.has(sid))
+            .flatMap(([, ts]) => ts);
+    }, [allTopics, selectedSubjects]);
+
+    const totalAvailable = useMemo(() => {
+        let pool = visibleTopics;
+        if (selectedTopics.size > 0) pool = pool.filter((t) => selectedTopics.has(t.id));
+        return pool.reduce((a, t) => a + (t.question_count || 0), 0);
+    }, [visibleTopics, selectedTopics]);
 
     const handleStart = async () => {
         setStarting(true);
         try {
             const payload = {
                 mode,
-                topic_ids: Array.from(selected),
+                subject_ids: Array.from(selectedSubjects),
+                topic_ids: Array.from(selectedTopics),
                 num_questions: numQuestions,
                 time_limit_minutes: mode === "exam" ? timeLimit : null,
+                question_type: questionType,
             };
             const data = await quizStart(payload);
             if (!data.questions?.length) {
@@ -60,8 +127,11 @@ export default function QuizSetup() {
                 JSON.stringify({
                     questions: data.questions,
                     mode,
-                    topic_ids: Array.from(selected),
+                    subject_ids: Array.from(selectedSubjects),
+                    topic_ids: Array.from(selectedTopics),
                     time_limit_seconds: mode === "exam" ? timeLimit * 60 : null,
+                    penalty_factor: penalty > 0 ? penalty : null,
+                    question_type: questionType,
                     started_at: Date.now(),
                 }),
             );
@@ -120,29 +190,79 @@ export default function QuizSetup() {
                 </div>
             </div>
 
-            {/* Temas */}
-            <div className="mb-8">
+            {/* Asignaturas */}
+            <div className="mb-6">
                 <div className="flex items-center justify-between mb-3">
-                    <span className="label-eyebrow">Temas {selected.size === 0 && "(todos)"}</span>
-                    {selected.size > 0 && (
+                    <span className="label-eyebrow">Asignaturas {selectedSubjects.size === 0 && "(todas)"}</span>
+                    {selectedSubjects.size > 0 && (
                         <button
-                            data-testid="clear-topics"
-                            onClick={() => setSelected(new Set())}
+                            data-testid="clear-subjects"
+                            onClick={() => setSelectedSubjects(new Set())}
                             className="text-xs font-medium hover:underline"
                             style={{ color: "var(--brand)" }}
                         >
-                            Limpiar selección
+                            Limpiar
                         </button>
                     )}
                 </div>
-                {topics.length === 0 ? (
+                {subjects.length === 0 ? (
                     <div className="card-organic p-5 text-sm" style={{ color: "var(--text-muted)" }}>
-                        Aún no tienes temas. Sube un PDF desde el inicio.
+                        No tienes asignaturas. Crea una desde el inicio.
                     </div>
                 ) : (
+                    <div className="flex flex-wrap gap-2">
+                        {subjects.map((s) => {
+                            const active = selectedSubjects.has(s.id);
+                            return (
+                                <button
+                                    key={s.id}
+                                    onClick={() => toggleSubject(s.id)}
+                                    data-testid={`subject-toggle-${s.id}`}
+                                    className="px-3 py-2 rounded-md border flex items-center gap-2 transition-all text-sm font-medium"
+                                    style={{
+                                        borderColor: active ? s.color : "var(--border)",
+                                        background: active ? `${s.color}18` : "white",
+                                    }}
+                                >
+                                    <span
+                                        className="w-2.5 h-2.5 rounded-full"
+                                        style={{ background: s.color }}
+                                    />
+                                    {s.name}
+                                    <span
+                                        className="text-xs font-mono px-1.5 py-0.5 rounded-sm"
+                                        style={{ background: "var(--bg-secondary)" }}
+                                    >
+                                        {s.question_count}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+
+            {/* Temas */}
+            {visibleTopics.length > 0 && (
+                <div className="mb-6">
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="label-eyebrow">
+                            Temas {selectedTopics.size === 0 && "(todos)"}
+                        </span>
+                        {selectedTopics.size > 0 && (
+                            <button
+                                data-testid="clear-topics"
+                                onClick={() => setSelectedTopics(new Set())}
+                                className="text-xs font-medium hover:underline"
+                                style={{ color: "var(--brand)" }}
+                            >
+                                Limpiar
+                            </button>
+                        )}
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {topics.map((t) => {
-                            const active = selected.has(t.id);
+                        {visibleTopics.map((t) => {
+                            const active = selectedTopics.has(t.id);
                             return (
                                 <button
                                     key={t.id}
@@ -157,13 +277,67 @@ export default function QuizSetup() {
                                     <span className="font-medium text-sm">{t.name}</span>
                                     <span
                                         className="text-xs font-mono px-1.5 py-0.5 rounded-sm"
-                                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                                        style={{
+                                            background: "var(--bg-secondary)",
+                                            color: "var(--text-secondary)",
+                                        }}
                                     >
                                         {t.question_count}
                                     </span>
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+            )}
+
+            {/* Tipo de examen */}
+            <div className="mb-6">
+                <span className="label-eyebrow block mb-3">Tipo de pregunta</span>
+                <div className="grid grid-cols-3 gap-2">
+                    {QTYPES.map((t) => (
+                        <button
+                            key={t.id}
+                            onClick={() => setQuestionType(t.id)}
+                            data-testid={`qtype-${t.id}`}
+                            className="px-3 py-2 rounded-md border text-sm font-medium transition-all"
+                            style={{
+                                borderColor: questionType === t.id ? "var(--brand)" : "var(--border)",
+                                background: questionType === t.id ? "#fdf1ea" : "white",
+                            }}
+                        >
+                            {t.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Penalización */}
+            <div className="mb-6">
+                <span className="label-eyebrow block mb-3">Sistema de corrección</span>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {PENALTIES.map((p) => (
+                        <button
+                            key={p.id}
+                            onClick={() => setPenalty(p.id)}
+                            data-testid={`penalty-${p.id}`}
+                            className="px-3 py-2 rounded-md border text-sm font-medium transition-all"
+                            style={{
+                                borderColor: penalty === p.id ? "var(--brand)" : "var(--border)",
+                                background: penalty === p.id ? "#fdf1ea" : "white",
+                            }}
+                        >
+                            {p.label}
+                        </button>
+                    ))}
+                </div>
+                {penalty > 0 && (
+                    <div
+                        className="mt-2 text-xs flex items-start gap-2 p-2 rounded-md"
+                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                    >
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
+                        Las preguntas en blanco no penalizan. Solo restan las falladas.
                     </div>
                 )}
             </div>
@@ -187,7 +361,6 @@ export default function QuizSetup() {
                 />
             </div>
 
-            {/* Tiempo */}
             {mode === "exam" && (
                 <div className="mb-8">
                     <span className="label-eyebrow block mb-2">
@@ -196,7 +369,7 @@ export default function QuizSetup() {
                     <input
                         type="range"
                         min="2"
-                        max="90"
+                        max="120"
                         value={timeLimit}
                         onChange={(e) => setTimeLimit(parseInt(e.target.value))}
                         data-testid="time-limit-range"
@@ -211,11 +384,7 @@ export default function QuizSetup() {
                 data-testid="start-quiz-btn"
                 className="btn-primary w-full flex items-center justify-center gap-2"
             >
-                {starting ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                    <Play className="w-4 h-4" />
-                )}
+                {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                 Empezar sesión
             </button>
         </div>

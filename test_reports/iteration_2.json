@@ -1,0 +1,43 @@
+{
+  "summary": "Backend v2 multi-subject refactor: 22/22 pytest tests PASSED. Covered subjects CRUD + migration, PDF upload (MCQ + TF), PDF list/regenerate/delete, quiz start filters (subject/type/num_options), TF shuffling rule, quiz submit with penalty math (raw=correct - wrong/penalty, clamp >=0, unanswered ignored), stats overview + by-subject, no _id leakage, cascade delete.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "DELETE /api/subjects/{id}",
+        "issue": "Cascade for PDFs is broken: line 421 uses 'await db.pdfs.delete_many({\"topic_id\": {\"$in\": []}})' which is a no-op. After deleting a subject, its child PDFs (db.pdfs documents) remain orphaned in the collection. Should first collect the topic IDs belonging to the subject (or topic_ids list) and pass them to the $in filter. Functional impact is small (orphan rows, no API breakage), but it slowly bloats the pdfs collection and contradicts the cascade promise stated in the requirements."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_studyapp_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix orphan PDF cascade in DELETE /api/subjects/{id} (server.py ~line 421). Suggested fix: gather topic IDs via 'topic_ids = [t[\"id\"] async for t in db.topics.find({\"subject_id\": subject_id}, {\"id\":1})]' before deleting topics, then 'await db.pdfs.delete_many({\"topic_id\": {\"$in\": topic_ids}})'."
+  ],
+  "critical_code_review_comments": [
+    "delete_subject: orphan PDFs after cascade (minor bug, see action items).",
+    "extract_pdf_text loads full PDF into memory and persists raw text in db.pdfs.text — fine for current scale but a 15MB PDF can produce a multi-MB Mongo doc; consider GridFS / size cap for production.",
+    "generate_questions_with_claude has good 3-attempt retry on transient errors and 120k char truncation guard.",
+    "quiz/start uses random.shuffle in-place on a list from Mongo — fine here but be aware questions list can be up to 5000 docs before truncation.",
+    "TF normalization correctly handles both string ('true'/'verdadero'/'sí'/'1') and bool correctness flags from Claude; ['Verdadero','Falso'] options enforced.",
+    "Penalty math verified: raw = correct - wrong/penalty_factor, clamped to 0, unanswered does NOT subtract. score_10 = (raw/total)*10."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_studyapp_backend.py (new)",
+    "/app/backend/tests/test_anatomia_backend.py (removed — obsolete)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "n/a"},
+  "test_credentials": "none — public API, no auth",
+  "seed_data_creation": "Generated /tmp/tronco.pdf (~7KB, anatomical text in Spanish) since the requested 15MB file was not present in the env. Created via reportlab. Test data (TEST_Fisiologia subject + TEST_Tronco_MCQ / TEST_Tronco_TF topics + their PDFs and questions) was cleaned up via cascade-delete in TestZCleanup. Pre-existing 'Anatomía' subject and its 28 questions were not modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "External backend URL: https://anatomy-exam-prep-2.preview.emergentagent.com. Test PDF at /tmp/tronco.pdf (small but >200 chars, sufficient). Use class-scoped 'state' fixture to share IDs between tests. Penalty math: with 1 correct + 1 wrong, penalty_factor=3 → raw=0.667, score_10=3.33; adding 1 unanswered → score_10=2.22 (total in denominator includes unanswered). Claude responses take 10-25s, so the LONG_TIMEOUT is 120s.",
+  "rca of the issue": "Only minor issue: delete_subject cascade for pdfs is hard-coded to '$in: []' — a no-op left over from refactor. Reproduce: POST /api/subjects → upload PDF → DELETE subject → db.pdfs still contains the pdf doc for the deleted topic. Mitigation: query topic_ids first, then delete pdfs whose topic_id is in that list."
+}

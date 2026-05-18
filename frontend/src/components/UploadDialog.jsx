@@ -1,48 +1,39 @@
 import { useState } from "react";
 import { Upload, X, FileText, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { uploadTopic, addMoreToTopic } from "@/lib/api";
+import { uploadTopic } from "@/lib/api";
 
-export default function UploadDialog({ open, onClose, onCreated, existingTopic }) {
+export default function UploadDialog({ open, onClose, onCreated, subjectId }) {
     const [file, setFile] = useState(null);
-    const [name, setName] = useState(existingTopic ? existingTopic.name : "");
+    const [name, setName] = useState("");
     const [numQuestions, setNumQuestions] = useState(20);
+    const [questionType, setQuestionType] = useState("mcq");
+    const [numOptions, setNumOptions] = useState(3);
     const [loading, setLoading] = useState(false);
 
     if (!open) return null;
 
-    const isAddMore = !!existingTopic;
-
     const onSubmit = async (e) => {
         e.preventDefault();
-        if (!file) {
-            toast.error("Selecciona un PDF");
-            return;
-        }
-        if (!isAddMore && !name.trim()) {
-            toast.error("Introduce un nombre para el tema");
-            return;
-        }
+        if (!file) return toast.error("Selecciona un PDF");
+        if (!name.trim()) return toast.error("Introduce un nombre para el tema");
+        if (!subjectId) return toast.error("Falta la asignatura");
+
         const fd = new FormData();
         fd.append("file", file);
+        fd.append("name", name.trim());
         fd.append("num_questions", String(numQuestions));
-        if (!isAddMore) fd.append("name", name.trim());
+        fd.append("question_type", questionType);
+        fd.append("num_options", String(numOptions));
 
         setLoading(true);
         try {
-            const res = isAddMore
-                ? await addMoreToTopic(existingTopic.id, fd)
-                : await uploadTopic(fd);
-            toast.success(
-                isAddMore
-                    ? `${res.questions_created} preguntas añadidas`
-                    : `Tema "${res.topic.name}" creado con ${res.questions_created} preguntas`,
-            );
+            const res = await uploadTopic(subjectId, fd);
+            toast.success(`Tema "${res.topic.name}" creado con ${res.questions_created} preguntas`);
             onCreated?.(res);
             onClose();
             setFile(null);
             setName("");
-            setNumQuestions(20);
         } catch (err) {
             const msg = err?.response?.data?.detail || err.message || "Error al procesar";
             toast.error(typeof msg === "string" ? msg : "Error al procesar");
@@ -53,23 +44,19 @@ export default function UploadDialog({ open, onClose, onCreated, existingTopic }
 
     return (
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto"
             style={{ background: "rgba(35,33,31,0.45)" }}
             data-testid="upload-dialog"
         >
-            <div
-                className="card-organic w-full max-w-lg fade-up"
-                style={{ background: "white" }}
-            >
-                <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: "var(--border)" }}>
+            <div className="card-organic w-full max-w-lg fade-up my-8" style={{ background: "white" }}>
+                <div
+                    className="flex items-center justify-between p-5 border-b"
+                    style={{ borderColor: "var(--border)" }}
+                >
                     <div>
-                        <h3 className="font-display text-xl font-bold">
-                            {isAddMore ? "Añadir más preguntas" : "Nuevo tema"}
-                        </h3>
+                        <h3 className="font-display text-xl font-bold">Nuevo tema</h3>
                         <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                            {isAddMore
-                                ? `Genera más preguntas para "${existingTopic.name}"`
-                                : "Sube un PDF y la IA generará preguntas tipo test"}
+                            Sube un PDF de temario y la IA generará las preguntas
                         </p>
                     </div>
                     <button
@@ -82,26 +69,24 @@ export default function UploadDialog({ open, onClose, onCreated, existingTopic }
                     </button>
                 </div>
                 <form onSubmit={onSubmit} className="p-5 space-y-4">
-                    {!isAddMore && (
-                        <div>
-                            <label className="label-eyebrow block mb-1.5">Nombre del tema</label>
-                            <input
-                                type="text"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                placeholder="Ej. Articulaciones"
-                                disabled={loading}
-                                data-testid="topic-name-input"
-                                className="w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[color:var(--brand)]/20 focus:border-[color:var(--brand)]"
-                                style={{ borderColor: "var(--border)" }}
-                            />
-                        </div>
-                    )}
+                    <div>
+                        <label className="label-eyebrow block mb-1.5">Nombre del tema</label>
+                        <input
+                            type="text"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            placeholder="Ej. Tema 1 — Introducción"
+                            disabled={loading}
+                            data-testid="topic-name-input"
+                            className="w-full border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[color:var(--brand)]/20 focus:border-[color:var(--brand)]"
+                            style={{ borderColor: "var(--border)" }}
+                        />
+                    </div>
 
                     <div>
-                        <label className="label-eyebrow block mb-1.5">PDF de diapositivas</label>
+                        <label className="label-eyebrow block mb-1.5">PDF de apuntes / temario</label>
                         <label
-                            className="border-2 border-dashed rounded-md p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors hover:border-[color:var(--brand)]"
+                            className="border-2 border-dashed rounded-md p-5 flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors hover:border-[color:var(--brand)]"
                             style={{ borderColor: file ? "var(--brand)" : "var(--border)" }}
                             data-testid="upload-dropzone"
                         >
@@ -134,6 +119,47 @@ export default function UploadDialog({ open, onClose, onCreated, existingTopic }
                     </div>
 
                     <div>
+                        <label className="label-eyebrow block mb-1.5">Tipo de preguntas</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {[
+                                { id: "mcq", label: "Opción múltiple" },
+                                { id: "tf", label: "Verdadero/Falso" },
+                            ].map((t) => (
+                                <button
+                                    key={t.id}
+                                    type="button"
+                                    onClick={() => setQuestionType(t.id)}
+                                    data-testid={`qtype-${t.id}`}
+                                    className="px-3 py-2 rounded-md border text-sm font-medium transition-all"
+                                    style={{
+                                        borderColor: questionType === t.id ? "var(--brand)" : "var(--border)",
+                                        background: questionType === t.id ? "#fdf1ea" : "white",
+                                    }}
+                                >
+                                    {t.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {questionType === "mcq" && (
+                        <div>
+                            <label className="label-eyebrow block mb-1.5">
+                                Nº de opciones por pregunta: <span className="font-mono">{numOptions}</span>
+                            </label>
+                            <input
+                                type="range"
+                                min="2"
+                                max="5"
+                                value={numOptions}
+                                onChange={(e) => setNumOptions(parseInt(e.target.value))}
+                                data-testid="num-options-range"
+                                className="w-full accent-[color:var(--brand)]"
+                            />
+                        </div>
+                    )}
+
+                    <div>
                         <label className="label-eyebrow block mb-1.5">
                             Nº de preguntas a generar: <span className="font-mono">{numQuestions}</span>
                         </label>
@@ -141,7 +167,6 @@ export default function UploadDialog({ open, onClose, onCreated, existingTopic }
                             type="range"
                             min="5"
                             max="50"
-                            step="1"
                             value={numQuestions}
                             disabled={loading}
                             onChange={(e) => setNumQuestions(parseInt(e.target.value))}

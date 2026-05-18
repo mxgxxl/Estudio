@@ -5,25 +5,25 @@ import {
     Trash2,
     BookOpen,
     Target,
-    Star,
     Flame,
     Brain,
     BarChart3,
     Sparkles,
     Clock,
     ChevronRight,
+    FolderOpen,
 } from "lucide-react";
 import { toast } from "sonner";
-import { listTopics, deleteTopic, getStats } from "@/lib/api";
-import UploadDialog from "@/components/UploadDialog";
+import { listSubjects, deleteSubject, getStats } from "@/lib/api";
+import NewSubjectDialog from "@/components/NewSubjectDialog";
 
-const StatCard = ({ icon: Icon, label, value, accent }) => (
+const StatCard = ({ icon: Icon, label, value }) => (
     <div className="card-organic p-5 fade-up">
         <div className="flex items-start justify-between">
             <span className="label-eyebrow">{label}</span>
             <div
                 className="w-8 h-8 rounded-md flex items-center justify-center"
-                style={{ background: accent || "var(--bg-secondary)" }}
+                style={{ background: "var(--bg-secondary)" }}
             >
                 <Icon className="w-4 h-4" style={{ color: "var(--text-secondary)" }} />
             </div>
@@ -60,10 +60,7 @@ const QuickMode = ({ to, icon: Icon, title, desc, badge, testid }) => (
                 {desc}
             </div>
         </div>
-        <div
-            className="flex items-center text-sm font-medium gap-1 mt-auto"
-            style={{ color: "var(--brand)" }}
-        >
+        <div className="flex items-center text-sm font-medium gap-1 mt-auto" style={{ color: "var(--brand)" }}>
             Empezar
             <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
         </div>
@@ -71,18 +68,18 @@ const QuickMode = ({ to, icon: Icon, title, desc, badge, testid }) => (
 );
 
 export default function Dashboard() {
-    const [topics, setTopics] = useState([]);
+    const [subjects, setSubjects] = useState([]);
     const [stats, setStats] = useState(null);
-    const [uploadOpen, setUploadOpen] = useState(false);
+    const [newOpen, setNewOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
 
     const load = async () => {
         setLoading(true);
         try {
-            const [t, s] = await Promise.all([listTopics(), getStats()]);
-            setTopics(t);
-            setStats(s);
+            const [s, st] = await Promise.all([listSubjects(), getStats()]);
+            setSubjects(s);
+            setStats(st);
         } catch (e) {
             console.error(e);
         } finally {
@@ -94,41 +91,45 @@ export default function Dashboard() {
         load();
     }, []);
 
-    const handleDelete = async (id, name) => {
-        if (!window.confirm(`¿Eliminar el tema "${name}" y todas sus preguntas?`)) return;
+    const handleDelete = async (e, id, name) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (
+            !window.confirm(`¿Eliminar la asignatura "${name}" y TODOS sus temas y preguntas?`)
+        )
+            return;
         try {
-            await deleteTopic(id);
-            toast.success("Tema eliminado");
+            await deleteSubject(id);
+            toast.success("Asignatura eliminada");
             load();
-        } catch (e) {
+        } catch {
             toast.error("Error al eliminar");
         }
     };
 
     return (
         <div className="max-w-6xl mx-auto px-5 md:px-8 py-8 md:py-12">
-            {/* Hero */}
             <section className="mb-10 fade-up">
                 <span className="label-eyebrow">Panel principal</span>
                 <h1
                     className="font-display font-bold tracking-tight mt-2"
                     style={{ fontSize: "clamp(2rem, 5vw, 3.5rem)", lineHeight: 1.05 }}
                 >
-                    Estudia anatomía con
+                    Estudia cualquier asignatura con
                     <br />
                     preguntas <em style={{ color: "var(--brand)", fontStyle: "italic" }}>generadas por ti</em>.
                 </h1>
                 <p className="mt-4 text-base md:text-lg max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-                    Sube las diapositivas de cada tema y la IA crea preguntas tipo test con 3 opciones. Practica, repasa errores y refuerza con repetición espaciada.
+                    Crea asignaturas, sube tus apuntes en PDF y la IA generará preguntas tipo test o verdadero/falso. Configura cada examen con su sistema de corrección.
                 </p>
                 <div className="mt-6 flex flex-wrap gap-3">
                     <button
-                        onClick={() => setUploadOpen(true)}
+                        onClick={() => setNewOpen(true)}
                         className="btn-primary flex items-center gap-2"
-                        data-testid="new-topic-btn"
+                        data-testid="new-subject-btn"
                     >
                         <Plus className="w-4 h-4" />
-                        Nuevo tema (PDF)
+                        Nueva asignatura
                     </button>
                     <button
                         onClick={() => navigate("/quiz/setup")}
@@ -142,19 +143,13 @@ export default function Dashboard() {
                 </div>
             </section>
 
-            {/* Stats */}
             <section className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+                <StatCard icon={FolderOpen} label="Asignaturas" value={stats?.total_subjects ?? "—"} />
                 <StatCard icon={BookOpen} label="Temas" value={stats?.total_topics ?? "—"} />
                 <StatCard icon={Target} label="Preguntas" value={stats?.total_questions ?? "—"} />
-                <StatCard
-                    icon={BarChart3}
-                    label="Precisión"
-                    value={stats ? `${stats.accuracy}%` : "—"}
-                />
-                <StatCard icon={Clock} label="Intentos" value={stats?.total_attempts ?? "—"} />
+                <StatCard icon={BarChart3} label="Precisión" value={stats ? `${stats.accuracy}%` : "—"} />
             </section>
 
-            {/* Quick modes */}
             <section className="mb-12">
                 <div className="flex items-end justify-between mb-4">
                     <div>
@@ -196,22 +191,19 @@ export default function Dashboard() {
                 </div>
             </section>
 
-            {/* Topics */}
             <section>
                 <div className="flex items-end justify-between mb-4">
                     <div>
-                        <span className="label-eyebrow">Tus temas</span>
-                        <h2 className="font-display text-2xl md:text-3xl font-bold mt-1">
-                            Biblioteca de estudio
-                        </h2>
+                        <span className="label-eyebrow">Tus asignaturas</span>
+                        <h2 className="font-display text-2xl md:text-3xl font-bold mt-1">Biblioteca de estudio</h2>
                     </div>
                     <button
-                        onClick={() => setUploadOpen(true)}
-                        data-testid="add-topic-btn"
+                        onClick={() => setNewOpen(true)}
+                        data-testid="add-subject-btn"
                         className="text-sm font-medium flex items-center gap-1 hover:underline"
                         style={{ color: "var(--brand)" }}
                     >
-                        <Plus className="w-4 h-4" /> Añadir tema
+                        <Plus className="w-4 h-4" /> Añadir asignatura
                     </button>
                 </div>
 
@@ -219,94 +211,74 @@ export default function Dashboard() {
                     <div className="card-organic p-8 text-center" style={{ color: "var(--text-muted)" }}>
                         Cargando…
                     </div>
-                ) : topics.length === 0 ? (
+                ) : subjects.length === 0 ? (
                     <div className="card-organic p-10 text-center fade-up">
-                        <BookOpen className="w-10 h-10 mx-auto mb-3" style={{ color: "var(--brand)" }} />
-                        <h3 className="font-display text-xl font-bold">No hay temas todavía</h3>
+                        <FolderOpen className="w-10 h-10 mx-auto mb-3" style={{ color: "var(--brand)" }} />
+                        <h3 className="font-display text-xl font-bold">No hay asignaturas todavía</h3>
                         <p className="mt-1 text-sm" style={{ color: "var(--text-muted)" }}>
-                            Sube tu primer PDF de diapositivas y empezamos a generar preguntas.
+                            Crea tu primera asignatura para empezar a añadir temas.
                         </p>
                         <button
-                            onClick={() => setUploadOpen(true)}
-                            data-testid="empty-add-topic-btn"
+                            onClick={() => setNewOpen(true)}
+                            data-testid="empty-add-subject-btn"
                             className="btn-primary mt-5 inline-flex items-center gap-2"
                         >
-                            <Plus className="w-4 h-4" /> Subir PDF
+                            <Plus className="w-4 h-4" /> Crear asignatura
                         </button>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {topics.map((t) => (
-                            <div
-                                key={t.id}
-                                className="card-organic p-5 flex flex-col gap-3 fade-up"
-                                data-testid={`topic-card-${t.id}`}
+                        {subjects.map((s) => (
+                            <Link
+                                key={s.id}
+                                to={`/asignaturas/${s.id}`}
+                                data-testid={`subject-card-${s.id}`}
+                                className="card-organic p-5 flex flex-col gap-3 fade-up hover:-translate-y-0.5 transition-transform"
                             >
-                                <div className="flex items-start justify-between">
-                                    <Link
-                                        to={`/temas/${t.id}`}
-                                        className="font-display font-bold text-lg hover:underline"
-                                    >
-                                        {t.name}
-                                    </Link>
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <span
+                                            className="w-3 h-3 rounded-full shrink-0"
+                                            style={{ background: s.color }}
+                                        />
+                                        <span className="font-display font-bold text-lg truncate">{s.name}</span>
+                                    </div>
                                     <button
-                                        onClick={() => handleDelete(t.id, t.name)}
-                                        data-testid={`delete-topic-${t.id}`}
+                                        onClick={(e) => handleDelete(e, s.id, s.name)}
+                                        data-testid={`delete-subject-${s.id}`}
                                         className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]"
-                                        title="Eliminar tema"
+                                        title="Eliminar asignatura"
                                     >
                                         <Trash2 className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
                                     </button>
                                 </div>
                                 <div className="flex items-center gap-4 text-sm" style={{ color: "var(--text-secondary)" }}>
                                     <span className="flex items-center gap-1">
-                                        <Target className="w-3.5 h-3.5" /> {t.question_count} preguntas
+                                        <BookOpen className="w-3.5 h-3.5" /> {s.topic_count} temas
                                     </span>
                                     <span className="flex items-center gap-1">
-                                        <BarChart3 className="w-3.5 h-3.5" /> {t.accuracy}%
+                                        <Target className="w-3.5 h-3.5" /> {s.question_count} preguntas
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        <BarChart3 className="w-3.5 h-3.5" /> {s.accuracy}%
                                     </span>
                                 </div>
                                 <div className="progress-track">
                                     <div
                                         className="progress-fill"
                                         style={{
-                                            width: `${
-                                                t.question_count
-                                                    ? Math.min(100, (t.answered_count / t.question_count) * 100)
-                                                    : 0
-                                            }%`,
+                                            width: `${s.accuracy}%`,
+                                            background: s.color,
                                         }}
                                     />
                                 </div>
-                                <div className="flex gap-2 mt-1">
-                                    <Link
-                                        to={`/quiz/setup?mode=practice&topic=${t.id}`}
-                                        data-testid={`practice-topic-${t.id}`}
-                                        className="flex-1 text-center text-sm font-medium px-3 py-2 rounded-md border hover:bg-[color:var(--bg-secondary)]"
-                                        style={{ borderColor: "var(--border)" }}
-                                    >
-                                        Practicar
-                                    </Link>
-                                    <Link
-                                        to={`/quiz/setup?mode=exam&topic=${t.id}`}
-                                        data-testid={`exam-topic-${t.id}`}
-                                        className="flex-1 text-center text-sm font-medium px-3 py-2 rounded-md text-white"
-                                        style={{ background: "var(--brand)" }}
-                                    >
-                                        Examen
-                                    </Link>
-                                </div>
-                            </div>
+                            </Link>
                         ))}
                     </div>
                 )}
             </section>
 
-            <UploadDialog
-                open={uploadOpen}
-                onClose={() => setUploadOpen(false)}
-                onCreated={load}
-            />
+            <NewSubjectDialog open={newOpen} onClose={() => setNewOpen(false)} onCreated={load} />
         </div>
     );
 }

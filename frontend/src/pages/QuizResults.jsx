@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Check, X, RotateCcw, Home, Sparkles } from "lucide-react";
+import { Check, X, RotateCcw, Home, Sparkles, MinusCircle } from "lucide-react";
 
 export default function QuizResults() {
     const navigate = useNavigate();
@@ -17,7 +17,17 @@ export default function QuizResults() {
 
     if (!data) return null;
 
-    const { correct, total, score_10, questions, answers } = data;
+    const {
+        correct,
+        wrong = 0,
+        unanswered = 0,
+        total,
+        score_10,
+        raw_score,
+        penalty_factor,
+        questions,
+        answers,
+    } = data;
     const pct = total ? Math.round((correct / total) * 100) : 0;
     const passed = score_10 >= 5;
 
@@ -28,9 +38,11 @@ export default function QuizResults() {
                 {passed ? "¡Bien hecho!" : "Sigue así, repasa los fallos"}
             </h1>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                 <div className="card-organic p-5 fade-up" data-testid="result-score">
-                    <span className="label-eyebrow">Nota</span>
+                    <span className="label-eyebrow">
+                        Nota {penalty_factor ? `(penalización ${penalty_factor}→−1)` : "(sin penalización)"}
+                    </span>
                     <div
                         className="font-display text-5xl font-bold mt-1"
                         style={{ color: passed ? "var(--sage)" : "var(--error)" }}
@@ -40,21 +52,45 @@ export default function QuizResults() {
                             /10
                         </span>
                     </div>
+                    {penalty_factor && (
+                        <div className="text-xs mt-1 font-mono" style={{ color: "var(--text-muted)" }}>
+                            Bruto: {raw_score} sobre {total}
+                        </div>
+                    )}
                 </div>
                 <div className="card-organic p-5 fade-up">
-                    <span className="label-eyebrow">Aciertos</span>
-                    <div className="font-display text-4xl font-bold mt-1">
-                        {correct}
-                        <span className="text-2xl" style={{ color: "var(--text-muted)" }}>
-                            /{total}
-                        </span>
+                    <span className="label-eyebrow">Resumen</span>
+                    <div className="grid grid-cols-3 gap-2 mt-2 text-center">
+                        <div>
+                            <Check className="w-4 h-4 mx-auto" style={{ color: "var(--sage)" }} />
+                            <div className="font-display text-2xl font-bold mt-1">{correct}</div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                                Aciertos
+                            </div>
+                        </div>
+                        <div>
+                            <X className="w-4 h-4 mx-auto" style={{ color: "var(--error)" }} />
+                            <div className="font-display text-2xl font-bold mt-1">{wrong}</div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                                Fallos
+                            </div>
+                        </div>
+                        <div>
+                            <MinusCircle className="w-4 h-4 mx-auto" style={{ color: "var(--text-muted)" }} />
+                            <div className="font-display text-2xl font-bold mt-1">{unanswered}</div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                                Blanco
+                            </div>
+                        </div>
                     </div>
-                </div>
-                <div className="card-organic p-5 fade-up">
-                    <span className="label-eyebrow">Precisión</span>
-                    <div className="font-display text-4xl font-bold mt-1">{pct}%</div>
-                    <div className="progress-track mt-2">
-                        <div className="progress-fill" style={{ width: `${pct}%` }} />
+                    <div className="progress-track mt-3">
+                        <div
+                            className="progress-fill"
+                            style={{ width: `${pct}%`, background: "var(--sage)" }}
+                        />
+                    </div>
+                    <div className="text-xs mt-1 font-mono text-right" style={{ color: "var(--text-muted)" }}>
+                        {pct}% aciertos
                     </div>
                 </div>
             </div>
@@ -84,15 +120,24 @@ export default function QuizResults() {
             <div className="space-y-3">
                 {questions.map((q, i) => {
                     const sel = answers[i];
-                    const ok = sel === q.correct_index;
+                    const isUnanswered = sel === -1;
+                    const ok = sel === q.correct_index && !isUnanswered;
                     return (
                         <div key={q.id} className="card-organic p-4 md:p-5 fade-up" data-testid={`review-q-${i}`}>
                             <div className="flex items-start gap-3">
                                 <span
                                     className="w-7 h-7 rounded-md flex items-center justify-center shrink-0"
-                                    style={{ background: ok ? "#eef2ec" : "#fbeeee" }}
+                                    style={{
+                                        background: isUnanswered
+                                            ? "var(--bg-secondary)"
+                                            : ok
+                                              ? "#eef2ec"
+                                              : "#fbeeee",
+                                    }}
                                 >
-                                    {ok ? (
+                                    {isUnanswered ? (
+                                        <MinusCircle className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
+                                    ) : ok ? (
                                         <Check className="w-4 h-4" style={{ color: "var(--sage)" }} />
                                     ) : (
                                         <X className="w-4 h-4" style={{ color: "var(--error)" }} />
@@ -100,7 +145,8 @@ export default function QuizResults() {
                                 </span>
                                 <div className="flex-1">
                                     <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
-                                        {q.topic_name} · Pregunta {i + 1}
+                                        {q.topic_name} · Pregunta {i + 1} ·{" "}
+                                        {q.question_type === "tf" ? "V/F" : "Test"}
                                     </div>
                                     <div className="font-display font-bold text-base md:text-lg leading-snug mb-2">
                                         {q.question}
@@ -127,7 +173,11 @@ export default function QuizResults() {
                                                     }}
                                                 >
                                                     <span className="kbd" style={{ background: "white" }}>
-                                                        {String.fromCharCode(65 + oi)}
+                                                        {q.question_type === "tf"
+                                                            ? oi === 0
+                                                                ? "V"
+                                                                : "F"
+                                                            : String.fromCharCode(65 + oi)}
                                                     </span>
                                                     <span className="flex-1">{opt}</span>
                                                 </li>

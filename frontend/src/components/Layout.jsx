@@ -24,10 +24,10 @@ export default function Layout() {
                                 className="w-9 h-9 rounded-md flex items-center justify-center"
                                 style={{ background: "var(--brand)" }}
                             >
-                                <span className="text-white font-display font-bold text-lg">A</span>
+                                <span className="text-white font-display font-bold text-lg">S</span>
                             </div>
                             <div className="flex flex-col leading-tight">
-                                <span className="font-display font-bold text-lg tracking-tight">Anatomía</span>
+                                <span className="font-display font-bold text-lg tracking-tight">Studia</span>
                                 <span className="label-eyebrow" style={{ fontSize: "0.55rem" }}>
                                     Estudio inteligente
                                 </span>
@@ -67,7 +67,7 @@ export default function Layout() {
                     className="border-t mt-12 py-6 text-center text-xs"
                     style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
                 >
-                    Anatomía · Estudia con preguntas generadas desde tus diapositivas
+                    Studia · Estudia cualquier asignatura con preguntas generadas desde tus apuntes
                 </footer>
             )}
         </div>

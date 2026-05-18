@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from "sonner";
 import Layout from "@/components/Layout";
 import Dashboard from "@/pages/Dashboard";
+import SubjectDetail from "@/pages/SubjectDetail";
 import QuizSetup from "@/pages/QuizSetup";
 import QuizRun from "@/pages/QuizRun";
 import QuizResults from "@/pages/QuizResults";
@@ -16,6 +17,7 @@ function App() {
                 <Routes>
                     <Route element={<Layout />}>
                         <Route path="/" element={<Dashboard />} />
+                        <Route path="/asignaturas/:id" element={<SubjectDetail />} />
                         <Route path="/quiz/setup" element={<QuizSetup />} />
                         <Route path="/quiz/run" element={<QuizRun />} />
                         <Route path="/quiz/results" element={<QuizResults />} />
