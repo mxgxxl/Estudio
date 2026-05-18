@@ -143,22 +143,8 @@ def _strip_code_fences(s: str) -> str:
     return s.strip()
 
 
-async def generate_questions_with_claude(
-    topic_name: str,
-    source_text: str,
-    num_questions: int,
-    question_type: str = "mcq",
-    num_options: int = 3,
-) -> List[dict]:
-    """Send the slides text to Claude Sonnet 4.5 and ask for MCQs or TF questions."""
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY no configurada")
-
-    # Truncate very long PDFs (safe context)
-    max_chars = 120_000
-    if len(source_text) > max_chars:
-        source_text = source_text[:max_chars]
-
+def _build_prompts(topic_name: str, source_text: str, num_questions: int, question_type: str, num_options: int):
+    """Builds the (system, user) prompt pair for a generation call."""
     system_msg = (
         "Eres un profesor experto. Tu tarea es generar preguntas de examen "
         "de alta calidad EXCLUSIVAMENTE a partir del temario que se te proporciona. "
@@ -166,7 +152,6 @@ async def generate_questions_with_claude(
         "universitario o de oposición. Responde SIEMPRE en español. "
         "Devuelve SOLO JSON válido, sin texto extra."
     )
-
     if question_type == "tf":
         user_prompt = f"""A partir del siguiente temario del tema "{topic_name}", \
 genera exactamente {num_questions} preguntas tipo VERDADERO/FALSO.
@@ -223,53 +208,26 @@ TEMARIO:
 {source_text}
 \"\"\"
 """
+    return system_msg, user_prompt
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"qgen-{uuid.uuid4()}",
-        system_message=system_msg,
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
-    # Retry on transient upstream failures (502/504/timeouts)
-    import asyncio as _asyncio
-    last_err = None
-    response = None
-    for attempt in range(3):
-        try:
-            response = await chat.send_message(UserMessage(text=user_prompt))
-            break
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            msg = str(e).lower()
-            is_transient = any(
-                k in msg
-                for k in ("502", "503", "504", "bad gateway", "timeout", "overloaded", "rate limit", "429")
-            )
-            logger.warning("Claude call failed (attempt %s/3): %s", attempt + 1, e)
-            if not is_transient or attempt == 2:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "El servicio de IA está temporalmente saturado. "
-                        "Vuelve a intentarlo en unos segundos. "
-                        f"(Detalle: {str(e)[:160]})"
-                    ),
-                ) from e
-            await _asyncio.sleep(2 ** attempt)
-    if response is None:
-        raise HTTPException(status_code=502, detail=f"Fallo al llamar a la IA: {last_err}")
-
-    raw = _strip_code_fences(response)
-
-    # Find JSON array in response if Claude added prose
+def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[dict]:
+    """Parse and normalise LLM response into validated question dicts."""
+    raw = _strip_code_fences(raw)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         match = re.search(r"\[\s*{.*}\s*\]", raw, re.DOTALL)
         if not match:
-            logger.error("No se pudo parsear JSON de Claude. Respuesta: %s", raw[:400])
-            raise HTTPException(status_code=502, detail="La IA no devolvió JSON válido")
-        data = json.loads(match.group(0))
+            logger.error("No JSON found. Resp head: %s", raw[:400])
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError as je:
+            logger.error("JSON parse failed: %s. Head: %s", je, raw[:400])
+            return []
+    if not isinstance(data, list):
+        return []
 
     cleaned: List[dict] = []
     if question_type == "tf":
@@ -281,8 +239,11 @@ TEMARIO:
                 correct = correct.strip().lower() in ("true", "verdadero", "v", "sí", "si", "1")
             if not isinstance(correct, bool):
                 continue
+            text = str(q.get("question", "")).strip()
+            if not text:
+                continue
             cleaned.append({
-                "question": str(q.get("question", "")).strip(),
+                "question": text,
                 "options": ["Verdadero", "Falso"],
                 "correct_index": 0 if correct else 1,
                 "explanation": str(q.get("explanation", "")).strip(),
@@ -295,17 +256,19 @@ TEMARIO:
             if not isinstance(q, dict):
                 continue
             opts = q.get("options") or []
-            if len(opts) != n:
+            if not isinstance(opts, list) or len(opts) != n:
                 continue
-            idx = q.get("correct_index", 0)
             try:
-                idx = int(idx)
+                idx = int(q.get("correct_index", 0))
             except (TypeError, ValueError):
                 idx = 0
             if idx < 0 or idx >= n:
                 idx = 0
+            text = str(q.get("question", "")).strip()
+            if not text:
+                continue
             cleaned.append({
-                "question": str(q.get("question", "")).strip(),
+                "question": text,
                 "options": [str(o).strip() for o in opts],
                 "correct_index": idx,
                 "explanation": str(q.get("explanation", "")).strip(),
@@ -313,6 +276,120 @@ TEMARIO:
                 "num_options": n,
             })
     return cleaned
+
+
+async def _call_llm_once(system_msg: str, user_prompt: str, provider: str, model: str) -> str:
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"qgen-{uuid.uuid4()}",
+        system_message=system_msg,
+    ).with_model(provider, model)
+    return await chat.send_message(UserMessage(text=user_prompt))
+
+
+async def _generate_batch(
+    topic_name: str,
+    source_text: str,
+    num_questions: int,
+    question_type: str,
+    num_options: int,
+) -> List[dict]:
+    """Generate a single batch (with retries + fallback to gpt-5.1)."""
+    import asyncio as _asyncio
+    system_msg, user_prompt = _build_prompts(
+        topic_name, source_text, num_questions, question_type, num_options
+    )
+
+    # Try Claude first with up to 5 attempts; then fallback to gpt-5.1 with 2 attempts.
+    plans = [
+        ("anthropic", "claude-sonnet-4-5-20250929", 5),
+        ("openai", "gpt-5.1", 2),
+    ]
+
+    last_err: Optional[Exception] = None
+    for provider, model, attempts in plans:
+        for attempt in range(attempts):
+            try:
+                resp = await _call_llm_once(system_msg, user_prompt, provider, model)
+                parsed = _parse_llm_response(resp, question_type, num_options)
+                if parsed:
+                    return parsed
+                logger.warning("Batch parsed 0 questions (%s/%s attempt %s).", provider, model, attempt + 1)
+                # if parsing returned 0, try once more
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                msg = str(e).lower()
+                is_transient = any(
+                    k in msg for k in (
+                        "502", "503", "504", "bad gateway", "timeout",
+                        "overloaded", "rate limit", "429", "connection",
+                    )
+                )
+                logger.warning(
+                    "LLM %s/%s failed (attempt %s/%s): %s",
+                    provider, model, attempt + 1, attempts, str(e)[:200],
+                )
+                if not is_transient and attempt == 0:
+                    # for non-transient errors on first attempt, escalate to next provider
+                    break
+            await _asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
+        # done with this provider, try fallback
+    if last_err:
+        logger.error("Batch failed across all providers: %s", str(last_err)[:300])
+    return []
+
+
+async def generate_questions_with_claude(
+    topic_name: str,
+    source_text: str,
+    num_questions: int,
+    question_type: str = "mcq",
+    num_options: int = 3,
+) -> List[dict]:
+    """Robustly generate `num_questions` items in small batches with retries+fallback."""
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY no configurada")
+
+    # Truncate very long PDFs (safe context)
+    max_chars = 120_000
+    if len(source_text) > max_chars:
+        source_text = source_text[:max_chars]
+
+    # Split big requests into batches of <=10 to reduce risk of partial failures
+    BATCH_SIZE = 10
+    if num_questions <= BATCH_SIZE:
+        batches = [num_questions]
+    else:
+        batches = []
+        remaining = num_questions
+        while remaining > 0:
+            n = min(BATCH_SIZE, remaining)
+            batches.append(n)
+            remaining -= n
+
+    all_questions: List[dict] = []
+    batch_errors = 0
+    for i, batch_n in enumerate(batches):
+        logger.info("Generating batch %s/%s (%s questions)…", i + 1, len(batches), batch_n)
+        items = await _generate_batch(topic_name, source_text, batch_n, question_type, num_options)
+        if items:
+            all_questions.extend(items)
+        else:
+            batch_errors += 1
+            logger.warning("Batch %s yielded no questions", i + 1)
+
+    if not all_questions:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "El servicio de IA no pudo generar preguntas. "
+                "El proveedor puede estar saturado. Vuelve a intentarlo en unos segundos."
+            ),
+        )
+    if batch_errors and batch_errors == len(batches):
+        # Should be unreachable given the all_questions check above, kept for safety
+        raise HTTPException(status_code=502, detail="Fallo total al generar preguntas")
+    return all_questions
 
 
 def _now_iso() -> str:
@@ -1053,6 +1130,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def ensure_indices():
+    """Create indices for scaling to many subjects / topics / PDFs / questions."""
+    try:
+        # subjects
+        await db.subjects.create_index("id", unique=True)
+        # topics
+        await db.topics.create_index("id", unique=True)
+        await db.topics.create_index("subject_id")
+        # pdfs
+        await db.pdfs.create_index("id", unique=True)
+        await db.pdfs.create_index("topic_id")
+        # questions
+        await db.questions.create_index("id", unique=True)
+        await db.questions.create_index("topic_id")
+        await db.questions.create_index("subject_id")
+        await db.questions.create_index("pdf_source_id")
+        await db.questions.create_index("favorite")
+        await db.questions.create_index("difficult")
+        await db.questions.create_index("srs_next_review")
+        await db.questions.create_index("question_type")
+        await db.questions.create_index([("times_answered", 1), ("times_correct", 1)])
+        # attempts
+        await db.attempts.create_index("id", unique=True)
+        await db.attempts.create_index([("created_at", -1)])
+        logger.info("MongoDB indices ensured.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ensure_indices failed: %s", e)
 
 
 @app.on_event("shutdown")

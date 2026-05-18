@@ -30,6 +30,7 @@ const QTYPES = [
 
 const PENALTIES = [
     { id: 0, label: "Sin penalización" },
+    { id: 1, label: "1 mal = −1 bien" },
     { id: 2, label: "2 mal = −1 bien" },
     { id: 3, label: "3 mal = −1 bien" },
     { id: 4, label: "4 mal = −1 bien" },
@@ -315,7 +316,7 @@ export default function QuizSetup() {
             {/* Penalización */}
             <div className="mb-6">
                 <span className="label-eyebrow block mb-3">Sistema de corrección</span>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
                     {PENALTIES.map((p) => (
                         <button
                             key={p.id}

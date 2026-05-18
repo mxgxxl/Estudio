@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 3 backend tests: 18/18 PASSED in 77s. Verified the new endpoints add_pdf_to_topic and generate_from_topic_pdfs (with batching), penalty_factor=1 math ('1 wrong = -1 right'), MongoDB startup indices, and regression on regenerate (mcq + tf) which now routes through the batching code path. Generation of 12 mcq questions returned the full 12 (no batch loss) in ~50s using 2 batches of 10+2.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "DELETE /api/subjects/{id}",
+        "issue": "Pre-existing (iteration_2): cascade for pdfs still uses `$in: []` no-op. Not retested here but still in server.py around line 421. Orphan PDF docs remain after subject delete. Cosmetic for current scale."
+      },
+      {
+        "endpoint": "POST /api/topics/{topic_id}/generate",
+        "issue": "On success the response is {questions_created, pdf_ids_used} but it doesn't surface how many batches partially failed. Consider adding `batches_attempted`, `batches_failed` so the frontend can warn the user when only 10/12 questions were created."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3_batching_penalty.py",
+    "/app/backend/tests/test_studyapp_backend.py",
+    "/app/test_reports/pytest/iter3_results.xml"
+  ],
+  "action_items": [
+    "(carry-over) Fix orphan PDF cascade in DELETE /api/subjects/{id} (line ~421): collect topic IDs first then $in delete.",
+    "Consider returning per-batch failure stats from /api/topics/{id}/generate so frontend can show partial-success warning."
+  ],
+  "critical_code_review_comments": [
+    "generate_questions_with_claude correctly splits into batches of 10 and tolerates partial failures (only fails if ALL batches return 0). Good defensive design.",
+    "_generate_batch has a subtle issue: on a non-transient first-attempt exception it breaks out of the retry loop and falls back to gpt-5.1 (intended). But after BOTH providers are tried, last_err is logged at the function end (not raised), and the function returns []. Caller (generate_questions_with_claude) only raises 502 when ALL batches return []. This is correct, just note that the original exception detail is logged but not surfaced to the API caller — fine.",
+    "_parse_llm_response: TF normalization accepts 'true','verdadero','v','sí','si','1'. Good.",
+    "MongoDB indices: all 11 expected indices created on startup; verified via list_indexes(). Idempotent via create_index.",
+    "add_pdf_to_topic correctly returns 400 for non-PDFs, 404 for unknown topic, requires ≥200 chars of extracted text. Cleanly separates upload from generation — frontend can let the user pick which PDFs to combine before generation.",
+    "generate_from_topic_pdfs concatenates PDFs with `=== Fuente: filename ===` separators (good for Claude grounding) and assigns the FIRST pdf as primary pdf_source_id for all generated questions — this is a known simplification; if you ever delete that PDF the questions retain link only to it. Acceptable trade-off.",
+    "Penalty math (penalty_factor=1) verified: 3c+1w → raw=2.0, score_10=5.00. 1c+2w → raw clamps to 0.0, score_10=0.00. unanswered correctly excluded from numerator but INCLUDED in total denominator (matches iteration_2 contract).",
+    "/api/subjects, /api/topics, /api/stats all respond in <1s under current data (28+ questions). Indices will keep this safe to ~100k docs.",
+    "Pre-existing concern: server.py is now 1168 lines — consider splitting into routers/llm/db modules before it grows further."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3_batching_penalty.py (new)"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "n/a"},
+  "test_credentials": "none — public API, no auth",
+  "seed_data_creation": "Created TEST_Iter3_Batching subject with one TEST_Tronco_Batch_MCQ topic (5 initial + 12 batched + 4 mcq regen + 4 tf regen ≈ 25 questions) plus a second uploaded-but-ungenerated PDF, then cascade-deleted in TestZCleanup. Pre-existing 'Anatomía' subject and its 28 questions were untouched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 3 confirmed batching works end-to-end on real /tmp/tronco.pdf (15MB Spanish anatomy PDF, ~1.5MB extracted text). Batched generation of 12 mcq took ~50s. /api/topics/{id}/generate uses primary_pdf_id = pdfs[0]['id'] for all created questions (intentional). MongoDB indices already in place. Penalty_factor=1 fully verified. /tmp/tronco.pdf is the real 15MB asset, not the small reportlab one from iteration_2. LONG_TIMEOUT=240s recommended for any generation test ≥10 questions.",
+  "rca of the issue": "No new bug found. Only carry-over minor issue from iteration_2 (orphan PDF cascade on delete_subject) and a small UX improvement suggestion (return batch failure count from /generate)."
+}
