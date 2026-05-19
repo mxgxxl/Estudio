@@ -1,6 +1,6 @@
 """
 Anatomía - Backend
-FastAPI + MongoDB + Google Gemini (google-generativeai)
+FastAPI + MongoDB + Google Gemini (google-genai SDK)
 """
 import os
 import io
@@ -21,7 +21,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -36,8 +37,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # direct successor (same speed/cost tier). Override via GEMINI_MODEL env if needed.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# Single Gemini client instance reused across requests (google-genai SDK)
+gemini_client: Optional[genai.Client] = (
+    genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+)
 
 app = FastAPI(title="Study App API")
 api = APIRouter(prefix="/api")
@@ -287,19 +290,21 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
 
 
 async def _call_gemini(system_msg: str, user_prompt: str) -> str:
-    """Single call to Gemini using google-generativeai."""
+    """Single call to Gemini using google-genai SDK (async)."""
     logger.info("[LLM-CALL] provider=gemini model=%s prompt_chars=%s", GEMINI_MODEL, len(user_prompt))
+    if gemini_client is None:
+        raise RuntimeError("GEMINI_API_KEY no configurada — gemini_client es None")
     try:
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system_msg,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.7,
-            },
+        response = await gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_msg,
+                response_mime_type="application/json",
+                temperature=0.7,
+            ),
         )
-        response = await model.generate_content_async(user_prompt)
-        text = (response.text or "") if hasattr(response, "text") else ""
+        text = response.text or ""
     except Exception as e:
         logger.error("[LLM-CALL-FAIL] provider=gemini exc=%s detail=%s", type(e).__name__, str(e)[:500])
         raise
@@ -431,12 +436,14 @@ async def diag_llm():
 @api.post("/diag/llm-test")
 async def diag_llm_test():
     """Ping Gemini and return whether it responds."""
-    if not GEMINI_API_KEY:
+    if gemini_client is None:
         return {"ok": False, "detail": "GEMINI_API_KEY not configured"}
     try:
-        model = genai.GenerativeModel(model_name=GEMINI_MODEL)
-        resp = await model.generate_content_async("Responde con la palabra exacta: OK")
-        text = (resp.text or "") if hasattr(resp, "text") else ""
+        resp = await gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents="Responde con la palabra exacta: OK",
+        )
+        text = resp.text or ""
         return {"ok": True, "model": GEMINI_MODEL, "response_head": text[:80]}
     except Exception as e:  # noqa: BLE001
         return {
