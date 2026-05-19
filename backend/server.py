@@ -1,6 +1,6 @@
 """
 Anatomía - Backend
-FastAPI + MongoDB + Claude Sonnet 4.5 (via emergentintegrations)
+FastAPI + MongoDB + Google Gemini (google-generativeai)
 """
 import os
 import io
@@ -21,7 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import google.generativeai as genai
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -31,10 +31,13 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# NOTE: gemini-1.5-flash has been deprecated by Google. gemini-2.5-flash is its
+# direct successor (same speed/cost tier). Override via GEMINI_MODEL env if needed.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="Study App API")
 api = APIRouter(prefix="/api")
@@ -42,14 +45,7 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("studyapp")
 
-# Diagnostic at boot: which keys are present (no values logged)
-logger.info(
-    "[LLM-DIAG] keys present: EMERGENT_LLM_KEY=%s ANTHROPIC_API_KEY=%s OPENAI_API_KEY=%s GEMINI_API_KEY=%s",
-    bool(EMERGENT_LLM_KEY),
-    bool(ANTHROPIC_API_KEY),
-    bool(OPENAI_API_KEY),
-    bool(GEMINI_API_KEY),
-)
+logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
 
 
 # ---------------------------------------------------------------------------
@@ -290,42 +286,25 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
     return cleaned
 
 
-async def _call_llm_once(system_msg: str, user_prompt: str, provider: str, model: str) -> str:
-    # Use the user's personal key for the matching provider if available
-    if provider == "gemini" and GEMINI_API_KEY:
-        api_key = GEMINI_API_KEY
-        key_source = "GEMINI_API_KEY"
-    elif provider == "anthropic" and ANTHROPIC_API_KEY:
-        api_key = ANTHROPIC_API_KEY
-        key_source = "ANTHROPIC_API_KEY"
-    elif provider == "openai" and OPENAI_API_KEY:
-        api_key = OPENAI_API_KEY
-        key_source = "OPENAI_API_KEY"
-    else:
-        api_key = EMERGENT_LLM_KEY
-        key_source = "EMERGENT_LLM_KEY"
-    logger.info(
-        "[LLM-CALL] provider=%s model=%s key=%s prompt_chars=%s",
-        provider, model, key_source, len(user_prompt),
-    )
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"qgen-{uuid.uuid4()}",
-        system_message=system_msg,
-    ).with_model(provider, model)
+async def _call_gemini(system_msg: str, user_prompt: str) -> str:
+    """Single call to Gemini using google-generativeai."""
+    logger.info("[LLM-CALL] provider=gemini model=%s prompt_chars=%s", GEMINI_MODEL, len(user_prompt))
     try:
-        response = await chat.send_message(UserMessage(text=user_prompt))
-    except Exception as e:
-        logger.error(
-            "[LLM-CALL-FAIL] provider=%s model=%s key=%s exc_type=%s detail=%s",
-            provider, model, key_source, type(e).__name__, str(e)[:500],
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            system_instruction=system_msg,
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.7,
+            },
         )
+        response = await model.generate_content_async(user_prompt)
+        text = (response.text or "") if hasattr(response, "text") else ""
+    except Exception as e:
+        logger.error("[LLM-CALL-FAIL] provider=gemini exc=%s detail=%s", type(e).__name__, str(e)[:500])
         raise
-    logger.info(
-        "[LLM-CALL-OK] provider=%s model=%s key=%s response_chars=%s",
-        provider, model, key_source, len(response or ""),
-    )
-    return response
+    logger.info("[LLM-CALL-OK] provider=gemini response_chars=%s", len(text))
+    return text
 
 
 async def _generate_batch(
@@ -335,65 +314,42 @@ async def _generate_batch(
     question_type: str,
     num_options: int,
 ) -> List[dict]:
-    """Generate a single batch (with retries + fallback chain)."""
+    """Generate a single batch with retries against Gemini."""
     import asyncio as _asyncio
     system_msg, user_prompt = _build_prompts(
         topic_name, source_text, num_questions, question_type, num_options
     )
 
-    # Build the provider chain.
-    # If the user has a personal Gemini key, prefer it (uses THEIR quota, not the
-    # universal budget). Otherwise, use the universal chain.
-    if GEMINI_API_KEY:
-        plans = [
-            ("gemini", "gemini-2.5-flash", 5),  # primary: user's own quota
-            ("anthropic", "claude-sonnet-4-5-20250929", 2),  # fallback: universal budget
-            ("openai", "gpt-5.1", 2),
-        ]
-    else:
-        plans = [
-            ("anthropic", "claude-sonnet-4-5-20250929", 5),
-            ("openai", "gpt-5.1", 2),
-            ("gemini", "gemini-2.5-flash", 2),
-        ]
-
     last_err: Optional[Exception] = None
-    for provider, model, attempts in plans:
-        logger.info("[LLM-PLAN] trying provider=%s model=%s max_attempts=%s", provider, model, attempts)
-        for attempt in range(attempts):
-            try:
-                resp = await _call_llm_once(system_msg, user_prompt, provider, model)
-                parsed = _parse_llm_response(resp, question_type, num_options)
-                if parsed:
-                    logger.info(
-                        "[LLM-PARSED] provider=%s model=%s questions=%s",
-                        provider, model, len(parsed),
-                    )
-                    return parsed
-                logger.warning(
-                    "[LLM-PARSE-EMPTY] provider=%s model=%s attempt=%s/%s — parsed 0 questions",
-                    provider, model, attempt + 1, attempts,
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            resp = await _call_gemini(system_msg, user_prompt)
+            parsed = _parse_llm_response(resp, question_type, num_options)
+            if parsed:
+                logger.info("[LLM-PARSED] provider=gemini questions=%s", len(parsed))
+                return parsed
+            logger.warning("[LLM-PARSE-EMPTY] attempt=%s/%s — parsed 0 questions", attempt + 1, attempts)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            msg = str(e).lower()
+            is_transient = any(
+                k in msg for k in (
+                    "429", "500", "502", "503", "504", "deadline",
+                    "timeout", "unavailable", "internal", "resource exhausted",
+                    "connection",
                 )
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                msg = str(e).lower()
-                is_transient = any(
-                    k in msg for k in (
-                        "502", "503", "504", "bad gateway", "timeout",
-                        "overloaded", "rate limit", "429", "connection",
-                    )
-                )
-                logger.warning(
-                    "[LLM-RETRY] provider=%s model=%s attempt=%s/%s transient=%s detail=%s",
-                    provider, model, attempt + 1, attempts, is_transient, str(e)[:300],
-                )
-                if not is_transient and attempt == 0:
-                    # for non-transient errors on first attempt, escalate to next provider
-                    logger.info("[LLM-ESCALATE] non-transient error, escalating to next provider")
-                    break
-            await _asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
+            )
+            logger.warning(
+                "[LLM-RETRY] attempt=%s/%s transient=%s detail=%s",
+                attempt + 1, attempts, is_transient, str(e)[:300],
+            )
+            if not is_transient and attempt == 0:
+                # Non-transient error → stop retrying immediately
+                break
+        await _asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
     if last_err:
-        logger.error("[LLM-BATCH-FAIL] all providers exhausted. Last error: %s", str(last_err)[:500])
+        logger.error("[LLM-BATCH-FAIL] Gemini exhausted. Last error: %s", str(last_err)[:500])
     return []
 
 
@@ -404,12 +360,9 @@ async def generate_questions_with_claude(
     question_type: str = "mcq",
     num_options: int = 3,
 ) -> List[dict]:
-    """Robustly generate `num_questions` items in small batches with retries+fallback."""
-    if not EMERGENT_LLM_KEY and not GEMINI_API_KEY and not ANTHROPIC_API_KEY and not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="No hay API key de IA configurada (EMERGENT_LLM_KEY o GEMINI_API_KEY)",
-        )
+    """Robustly generate `num_questions` items in small batches with Gemini."""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
 
     # Truncate very long PDFs (safe context)
     max_chars = 120_000
@@ -467,50 +420,31 @@ async def root():
 
 @api.get("/diag/llm")
 async def diag_llm():
-    """Diagnostic endpoint: which API keys are present (no values)."""
+    """Diagnostic endpoint: shows the AI provider configured."""
     return {
-        "EMERGENT_LLM_KEY_present": bool(EMERGENT_LLM_KEY),
-        "ANTHROPIC_API_KEY_present": bool(ANTHROPIC_API_KEY),
-        "OPENAI_API_KEY_present": bool(OPENAI_API_KEY),
+        "provider": "gemini",
+        "model": GEMINI_MODEL,
         "GEMINI_API_KEY_present": bool(GEMINI_API_KEY),
-        "default_provider_chain": [
-            "anthropic/claude-sonnet-4-5-20250929",
-            "openai/gpt-5.1",
-            "gemini/gemini-2.5-flash",
-        ],
     }
 
 
 @api.post("/diag/llm-test")
 async def diag_llm_test():
-    """Quick LLM ping: try Anthropic, OpenAI, Gemini and return which succeeded."""
-    results = {}
-    plans = [
-        ("anthropic", "claude-sonnet-4-5-20250929", ANTHROPIC_API_KEY or EMERGENT_LLM_KEY, "ANTHROPIC_API_KEY" if ANTHROPIC_API_KEY else "EMERGENT_LLM_KEY"),
-        ("openai", "gpt-5.1", OPENAI_API_KEY or EMERGENT_LLM_KEY, "OPENAI_API_KEY" if OPENAI_API_KEY else "EMERGENT_LLM_KEY"),
-        ("gemini", "gemini-2.5-flash", GEMINI_API_KEY or EMERGENT_LLM_KEY, "GEMINI_API_KEY" if GEMINI_API_KEY else "EMERGENT_LLM_KEY"),
-    ]
-    for provider, model, api_key, key_source in plans:
-        try:
-            chat = LlmChat(
-                api_key=api_key,
-                session_id=f"diag-{uuid.uuid4()}",
-                system_message="Responde con la palabra exacta: OK",
-            ).with_model(provider, model)
-            resp = await chat.send_message(UserMessage(text="Di OK"))
-            results[f"{provider}/{model}"] = {
-                "ok": True,
-                "key": key_source,
-                "response_head": (resp or "")[:80],
-            }
-        except Exception as e:  # noqa: BLE001
-            results[f"{provider}/{model}"] = {
-                "ok": False,
-                "key": key_source,
-                "exc_type": type(e).__name__,
-                "detail": str(e)[:400],
-            }
-    return results
+    """Ping Gemini and return whether it responds."""
+    if not GEMINI_API_KEY:
+        return {"ok": False, "detail": "GEMINI_API_KEY not configured"}
+    try:
+        model = genai.GenerativeModel(model_name=GEMINI_MODEL)
+        resp = await model.generate_content_async("Responde con la palabra exacta: OK")
+        text = (resp.text or "") if hasattr(resp, "text") else ""
+        return {"ok": True, "model": GEMINI_MODEL, "response_head": text[:80]}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "model": GEMINI_MODEL,
+            "exc_type": type(e).__name__,
+            "detail": str(e)[:400],
+        }
 
 
 # ---- Migration helper (called on demand) ----

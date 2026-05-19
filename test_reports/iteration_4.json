@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 4 backend tests: Gemini-only refactor verified. 14/14 tests PASSED in 42s. All requested checks green: diag endpoints, Gemini reachability, 5-MCQ generation (12s), 12-MCQ batched 10+2 (19s, full 12 returned), TF normalization ['Verdadero','Falso'], quiz/start + quiz/submit with penalty_factor=1, requirements.txt purity, and backend log markers [LLM-CALL] / [LLM-PARSED] provider=gemini model=gemini-2.5-flash.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/topics/{topic_id}/generate",
+        "issue": "Under heavy back-to-back load (e.g., running iter3+iter4 regression suites consecutively, ~25 generations in <2min) Gemini returns 429 ResourceExhausted on the user's personal Google Cloud free quota (RPM limit). Retry+backoff (5 attempts, up to 8s sleep) is correctly classifying these as transient but cannot recover within the minute. End user sees 502 with the message 'El servicio de IA no pudo generar preguntas. El proveedor puede estar saturado.' — accurate. Cosmetic improvement: consider increasing max backoff to 30-60s for 429 specifically, or returning 429 instead of 502 so frontend can offer a 'retry in 60s' affordance."
+      },
+      {
+        "endpoint": "DELETE /api/subjects/{id}",
+        "issue": "Carry-over from iter2/iter3: orphan PDFs after subject cascade (line ~421 uses no-op `$in: []`). Not retested. Cosmetic at current scale."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_gemini_only.py",
+    "/app/test_reports/pytest/iter4_results.xml",
+    "/app/test_reports/pytest/iter4_regression.xml"
+  ],
+  "action_items": [
+    "(Optional UX) Surface 429 from Gemini back to frontend with Retry-After hint instead of generic 502, so user knows to wait ~60s rather than retrying immediately.",
+    "(Optional UX) /generate could return `batches_failed` count so frontend can warn when only 10/12 were created (carry-over from iter3)."
+  ],
+  "critical_code_review_comments": [
+    "google-generativeai SDK is wired correctly: genai.configure() at module import (line 40), GenerativeModel constructed per-call inside _call_gemini with system_instruction + response_mime_type='application/json' + temperature=0.7. Uses async API generate_content_async (good, no thread blocking).",
+    "Model default 'gemini-2.5-flash' is correct — gemini-1.5-flash was retired by Google. GEMINI_MODEL env override is supported.",
+    "Retry loop in _generate_batch correctly classifies 429/5xx/timeout/connection as transient. Exponential backoff capped at 8s. After 5 failed attempts logs [LLM-BATCH-FAIL] and returns []. Caller raises 502 only when ALL batches fail — good resilience.",
+    "Batching unchanged at 10/batch. 12 questions => 2 batches => full 12 questions delivered in ~19s. ",
+    "Diag endpoints (/api/diag/llm, /api/diag/llm-test) are well-designed for ops visibility: GET returns config only (cheap); POST does a real Gemini ping with the 'OK' canary.",
+    "requirements.txt is clean: NO anthropic, NO openai, NO litellm, NO emergentintegrations. google-generativeai==0.8.6 present. (NB: EMERGENT_LLM_KEY env var still in /app/backend/.env but unused — harmless leftover; safe to leave.)",
+    "server.py is still 1211 lines (slight growth). Suggest splitting into routers/llm/db modules.",
+    "Function name generate_questions_with_claude is intentionally kept for backwards compat — comment in docstring confirms. Fine."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_gemini_only.py (new)"
+  ],
+  "success_rate": {"backend": "100% (14/14 iter4); regression iter3 hit rate-limit during back-to-back run — not a bug", "frontend": "n/a"},
+  "test_credentials": "none — public API, no auth",
+  "seed_data_creation": "Uploaded /tmp/tronco.pdf (9656 chars extracted) onto existing topic 'Huesos del tronco' (3bdbf094-...). Generated 5 mcq + 12 mcq + 3 tf = ~20 questions. Cleanup step deleted only the uploaded PDF; the existing questions remain on the topic for future tests.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All iter4 acceptance criteria green. iter3 regression suite (test_iteration3_batching_penalty.py and test_studyapp_backend.py::test_regenerate_from_pdf_tf) failed only because of Gemini 429 ResourceExhausted on the user's personal quota when run back-to-back with iter4 (~25 generations within 2 minutes). Run iter3 suite ALONE after a 60s cooldown for clean regression. If quota is a recurring concern, consider switching GEMINI_MODEL env to 'gemini-2.5-flash-lite' (cheaper/higher RPM) or paid tier. Logs show clean [LLM-CALL] provider=gemini model=gemini-2.5-flash and [LLM-PARSED] provider=gemini questions=N markers as required.",
+  "rca of the issue": "Iter4 acceptance: no bugs. Iter3 cascade failure RCA: 429 ResourceExhausted from Gemini free-tier RPM limit (not the daily 1500 quota). Reproduction: run pytest on test_iteration4_gemini_only.py followed immediately by test_iteration3_batching_penalty.py. Mitigation in code: retry logic already classifies 429 as transient and backs off up to 8s — works when isolated, exhausts when running 25+ gens in 2min. Suggested mitigation: (a) increase max backoff for 429 to 30-60s, (b) bubble Retry-After header from Gemini up to API caller, or (c) document that integration tests need 60s spacing between suites."
+}
