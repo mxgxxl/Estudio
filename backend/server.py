@@ -32,12 +32,24 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 app = FastAPI(title="Study App API")
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("studyapp")
+
+# Diagnostic at boot: which keys are present (no values logged)
+logger.info(
+    "[LLM-DIAG] keys present: EMERGENT_LLM_KEY=%s ANTHROPIC_API_KEY=%s OPENAI_API_KEY=%s GEMINI_API_KEY=%s",
+    bool(EMERGENT_LLM_KEY),
+    bool(ANTHROPIC_API_KEY),
+    bool(OPENAI_API_KEY),
+    bool(GEMINI_API_KEY),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +291,22 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
 
 
 async def _call_llm_once(system_msg: str, user_prompt: str, provider: str, model: str) -> str:
+    logger.info("[LLM-CALL] provider=%s model=%s prompt_chars=%s", provider, model, len(user_prompt))
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"qgen-{uuid.uuid4()}",
         system_message=system_msg,
     ).with_model(provider, model)
-    return await chat.send_message(UserMessage(text=user_prompt))
+    try:
+        response = await chat.send_message(UserMessage(text=user_prompt))
+    except Exception as e:
+        logger.error(
+            "[LLM-CALL-FAIL] provider=%s model=%s exc_type=%s detail=%s",
+            provider, model, type(e).__name__, str(e)[:500],
+        )
+        raise
+    logger.info("[LLM-CALL-OK] provider=%s model=%s response_chars=%s", provider, model, len(response or ""))
+    return response
 
 
 async def _generate_batch(
@@ -304,18 +326,26 @@ async def _generate_batch(
     plans = [
         ("anthropic", "claude-sonnet-4-5-20250929", 5),
         ("openai", "gpt-5.1", 2),
+        ("gemini", "gemini-2.5-flash", 2),
     ]
 
     last_err: Optional[Exception] = None
     for provider, model, attempts in plans:
+        logger.info("[LLM-PLAN] trying provider=%s model=%s max_attempts=%s", provider, model, attempts)
         for attempt in range(attempts):
             try:
                 resp = await _call_llm_once(system_msg, user_prompt, provider, model)
                 parsed = _parse_llm_response(resp, question_type, num_options)
                 if parsed:
+                    logger.info(
+                        "[LLM-PARSED] provider=%s model=%s questions=%s",
+                        provider, model, len(parsed),
+                    )
                     return parsed
-                logger.warning("Batch parsed 0 questions (%s/%s attempt %s).", provider, model, attempt + 1)
-                # if parsing returned 0, try once more
+                logger.warning(
+                    "[LLM-PARSE-EMPTY] provider=%s model=%s attempt=%s/%s — parsed 0 questions",
+                    provider, model, attempt + 1, attempts,
+                )
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 msg = str(e).lower()
@@ -326,16 +356,16 @@ async def _generate_batch(
                     )
                 )
                 logger.warning(
-                    "LLM %s/%s failed (attempt %s/%s): %s",
-                    provider, model, attempt + 1, attempts, str(e)[:200],
+                    "[LLM-RETRY] provider=%s model=%s attempt=%s/%s transient=%s detail=%s",
+                    provider, model, attempt + 1, attempts, is_transient, str(e)[:300],
                 )
                 if not is_transient and attempt == 0:
                     # for non-transient errors on first attempt, escalate to next provider
+                    logger.info("[LLM-ESCALATE] non-transient error, escalating to next provider")
                     break
             await _asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
-        # done with this provider, try fallback
     if last_err:
-        logger.error("Batch failed across all providers: %s", str(last_err)[:300])
+        logger.error("[LLM-BATCH-FAIL] all providers exhausted. Last error: %s", str(last_err)[:500])
     return []
 
 
@@ -402,6 +432,49 @@ def _now_iso() -> str:
 @api.get("/")
 async def root():
     return {"app": "Study App", "status": "ok"}
+
+
+@api.get("/diag/llm")
+async def diag_llm():
+    """Diagnostic endpoint: which API keys are present (no values)."""
+    return {
+        "EMERGENT_LLM_KEY_present": bool(EMERGENT_LLM_KEY),
+        "ANTHROPIC_API_KEY_present": bool(ANTHROPIC_API_KEY),
+        "OPENAI_API_KEY_present": bool(OPENAI_API_KEY),
+        "GEMINI_API_KEY_present": bool(GEMINI_API_KEY),
+        "default_provider_chain": [
+            "anthropic/claude-sonnet-4-5-20250929",
+            "openai/gpt-5.1",
+            "gemini/gemini-2.5-flash",
+        ],
+    }
+
+
+@api.post("/diag/llm-test")
+async def diag_llm_test():
+    """Quick LLM ping: try Anthropic, OpenAI, Gemini and return which succeeded."""
+    results = {}
+    plans = [
+        ("anthropic", "claude-sonnet-4-5-20250929"),
+        ("openai", "gpt-5.1"),
+        ("gemini", "gemini-2.5-flash"),
+    ]
+    for provider, model in plans:
+        try:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"diag-{uuid.uuid4()}",
+                system_message="Responde con la palabra exacta: OK",
+            ).with_model(provider, model)
+            resp = await chat.send_message(UserMessage(text="Di OK"))
+            results[f"{provider}/{model}"] = {"ok": True, "response_head": (resp or "")[:80]}
+        except Exception as e:  # noqa: BLE001
+            results[f"{provider}/{model}"] = {
+                "ok": False,
+                "exc_type": type(e).__name__,
+                "detail": str(e)[:400],
+            }
+    return results
 
 
 # ---- Migration helper (called on demand) ----
