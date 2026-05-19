@@ -291,9 +291,25 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
 
 
 async def _call_llm_once(system_msg: str, user_prompt: str, provider: str, model: str) -> str:
-    logger.info("[LLM-CALL] provider=%s model=%s prompt_chars=%s", provider, model, len(user_prompt))
+    # Use the user's personal key for the matching provider if available
+    if provider == "gemini" and GEMINI_API_KEY:
+        api_key = GEMINI_API_KEY
+        key_source = "GEMINI_API_KEY"
+    elif provider == "anthropic" and ANTHROPIC_API_KEY:
+        api_key = ANTHROPIC_API_KEY
+        key_source = "ANTHROPIC_API_KEY"
+    elif provider == "openai" and OPENAI_API_KEY:
+        api_key = OPENAI_API_KEY
+        key_source = "OPENAI_API_KEY"
+    else:
+        api_key = EMERGENT_LLM_KEY
+        key_source = "EMERGENT_LLM_KEY"
+    logger.info(
+        "[LLM-CALL] provider=%s model=%s key=%s prompt_chars=%s",
+        provider, model, key_source, len(user_prompt),
+    )
     chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
+        api_key=api_key,
         session_id=f"qgen-{uuid.uuid4()}",
         system_message=system_msg,
     ).with_model(provider, model)
@@ -301,11 +317,14 @@ async def _call_llm_once(system_msg: str, user_prompt: str, provider: str, model
         response = await chat.send_message(UserMessage(text=user_prompt))
     except Exception as e:
         logger.error(
-            "[LLM-CALL-FAIL] provider=%s model=%s exc_type=%s detail=%s",
-            provider, model, type(e).__name__, str(e)[:500],
+            "[LLM-CALL-FAIL] provider=%s model=%s key=%s exc_type=%s detail=%s",
+            provider, model, key_source, type(e).__name__, str(e)[:500],
         )
         raise
-    logger.info("[LLM-CALL-OK] provider=%s model=%s response_chars=%s", provider, model, len(response or ""))
+    logger.info(
+        "[LLM-CALL-OK] provider=%s model=%s key=%s response_chars=%s",
+        provider, model, key_source, len(response or ""),
+    )
     return response
 
 
@@ -316,18 +335,27 @@ async def _generate_batch(
     question_type: str,
     num_options: int,
 ) -> List[dict]:
-    """Generate a single batch (with retries + fallback to gpt-5.1)."""
+    """Generate a single batch (with retries + fallback chain)."""
     import asyncio as _asyncio
     system_msg, user_prompt = _build_prompts(
         topic_name, source_text, num_questions, question_type, num_options
     )
 
-    # Try Claude first with up to 5 attempts; then fallback to gpt-5.1 with 2 attempts.
-    plans = [
-        ("anthropic", "claude-sonnet-4-5-20250929", 5),
-        ("openai", "gpt-5.1", 2),
-        ("gemini", "gemini-2.5-flash", 2),
-    ]
+    # Build the provider chain.
+    # If the user has a personal Gemini key, prefer it (uses THEIR quota, not the
+    # universal budget). Otherwise, use the universal chain.
+    if GEMINI_API_KEY:
+        plans = [
+            ("gemini", "gemini-2.5-flash", 5),  # primary: user's own quota
+            ("anthropic", "claude-sonnet-4-5-20250929", 2),  # fallback: universal budget
+            ("openai", "gpt-5.1", 2),
+        ]
+    else:
+        plans = [
+            ("anthropic", "claude-sonnet-4-5-20250929", 5),
+            ("openai", "gpt-5.1", 2),
+            ("gemini", "gemini-2.5-flash", 2),
+        ]
 
     last_err: Optional[Exception] = None
     for provider, model, attempts in plans:
@@ -377,8 +405,11 @@ async def generate_questions_with_claude(
     num_options: int = 3,
 ) -> List[dict]:
     """Robustly generate `num_questions` items in small batches with retries+fallback."""
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY no configurada")
+    if not EMERGENT_LLM_KEY and not GEMINI_API_KEY and not ANTHROPIC_API_KEY and not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="No hay API key de IA configurada (EMERGENT_LLM_KEY o GEMINI_API_KEY)",
+        )
 
     # Truncate very long PDFs (safe context)
     max_chars = 120_000
@@ -455,22 +486,27 @@ async def diag_llm_test():
     """Quick LLM ping: try Anthropic, OpenAI, Gemini and return which succeeded."""
     results = {}
     plans = [
-        ("anthropic", "claude-sonnet-4-5-20250929"),
-        ("openai", "gpt-5.1"),
-        ("gemini", "gemini-2.5-flash"),
+        ("anthropic", "claude-sonnet-4-5-20250929", ANTHROPIC_API_KEY or EMERGENT_LLM_KEY, "ANTHROPIC_API_KEY" if ANTHROPIC_API_KEY else "EMERGENT_LLM_KEY"),
+        ("openai", "gpt-5.1", OPENAI_API_KEY or EMERGENT_LLM_KEY, "OPENAI_API_KEY" if OPENAI_API_KEY else "EMERGENT_LLM_KEY"),
+        ("gemini", "gemini-2.5-flash", GEMINI_API_KEY or EMERGENT_LLM_KEY, "GEMINI_API_KEY" if GEMINI_API_KEY else "EMERGENT_LLM_KEY"),
     ]
-    for provider, model in plans:
+    for provider, model, api_key, key_source in plans:
         try:
             chat = LlmChat(
-                api_key=EMERGENT_LLM_KEY,
+                api_key=api_key,
                 session_id=f"diag-{uuid.uuid4()}",
                 system_message="Responde con la palabra exacta: OK",
             ).with_model(provider, model)
             resp = await chat.send_message(UserMessage(text="Di OK"))
-            results[f"{provider}/{model}"] = {"ok": True, "response_head": (resp or "")[:80]}
+            results[f"{provider}/{model}"] = {
+                "ok": True,
+                "key": key_source,
+                "response_head": (resp or "")[:80],
+            }
         except Exception as e:  # noqa: BLE001
             results[f"{provider}/{model}"] = {
                 "ok": False,
+                "key": key_source,
                 "exc_type": type(e).__name__,
                 "detail": str(e)[:400],
             }
