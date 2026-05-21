@@ -1173,13 +1173,38 @@ async def stats_by_topic():
 # Register
 app.include_router(api)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- CORS ---
+# Always allow these baseline origins so the app keeps working even if the
+# CORS_ORIGINS env var is missing in production (e.g., Railway).
+_BASELINE_ORIGINS = [
+    "https://impartial-passion-production-9090.up.railway.app",
+]
+_raw = os.environ.get("CORS_ORIGINS", "*")
+_env_origins = [o.strip() for o in _raw.split(",") if o.strip()]
+_allow_all = "*" in _env_origins
+_explicit_origins = sorted({*(o for o in _env_origins if o != "*"), *_BASELINE_ORIGINS})
+
+if _allow_all:
+    # When using "*", credentials cannot be true per CORS spec. We allow any
+    # origin via regex so that browsers accept it; FastAPI then echoes the
+    # request Origin back, which works even with allow_credentials=False.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("[CORS] allow_origin_regex=.* (wildcard) baseline_extra=%s", _BASELINE_ORIGINS)
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_explicit_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("[CORS] explicit origins=%s", _explicit_origins)
 
 
 @app.on_event("startup")
