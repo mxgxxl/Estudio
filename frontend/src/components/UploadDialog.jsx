@@ -10,6 +10,7 @@ export default function UploadDialog({ open, onClose, onCreated, subjectId }) {
     const [questionType, setQuestionType] = useState("mcq");
     const [numOptions, setNumOptions] = useState(3);
     const [loading, setLoading] = useState(false);
+    const [customInstructions, setCustomInstructions] = useState("");
 
     if (!open) return null;
 
@@ -25,6 +26,7 @@ export default function UploadDialog({ open, onClose, onCreated, subjectId }) {
         fd.append("num_questions", String(numQuestions));
         fd.append("question_type", questionType);
         fd.append("num_options", String(numOptions));
+        if (customInstructions.trim()) fd.append("custom_instructions", customInstructions.trim());
 
         setLoading(true);
         try {
@@ -174,6 +176,25 @@ export default function UploadDialog({ open, onClose, onCreated, subjectId }) {
                             data-testid="num-questions-slider"
                             className="w-full accent-[color:var(--brand)]"
                         />
+                    </div>
+
+                    <div>
+                        <label className="label-eyebrow block mb-1.5">
+                            Instrucciones personalizadas{" "}
+                            <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(opcional)</span>
+                        </label>
+                        <textarea
+                            value={customInstructions}
+                            onChange={(e) => setCustomInstructions(e.target.value)}
+                            disabled={loading}
+                            placeholder="Ej: Céntrate en los huesos del pie · Solo preguntas sobre origen e inserción de músculos · Nivel avanzado"
+                            rows={3}
+                            className="w-full border rounded-md px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1"
+                            style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+                        />
+                        <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                            La IA seguirá estas instrucciones al generar las preguntas.
+                        </p>
                     </div>
 
                     <div className="flex gap-3 pt-2">
