@@ -45,7 +45,7 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("studyapp")
 
-logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s flashcards=enabled", GEMINI_MODEL, bool(GEMINI_API_KEY))
+logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
 
 
 # ---------------------------------------------------------------------------
@@ -1358,71 +1358,6 @@ async def stats_by_topic():
     return out
 
 
-# Register
-app.include_router(api)
-
-# --- CORS ---
-_BASELINE_ORIGINS = [
-    "https://impartial-passion-production-9090.up.railway.app",
-]
-_raw = os.environ.get("CORS_ORIGINS", "*")
-_env_origins = [o.strip() for o in _raw.split(",") if o.strip()]
-_allow_all = "*" in _env_origins
-_explicit_origins = sorted({*(o for o in _env_origins if o != "*"), *_BASELINE_ORIGINS})
-
-if _allow_all:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=".*",
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    logger.info("[CORS] allow_origin_regex=.* (wildcard) baseline_extra=%s", _BASELINE_ORIGINS)
-else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_explicit_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    logger.info("[CORS] explicit origins=%s", _explicit_origins)
-
-
-@app.on_event("startup")
-async def ensure_indices():
-    try:
-        await db.subjects.create_index("id", unique=True)
-        await db.topics.create_index("id", unique=True)
-        await db.topics.create_index("subject_id")
-        await db.pdfs.create_index("id", unique=True)
-        await db.pdfs.create_index("topic_id")
-        await db.questions.create_index("id", unique=True)
-        await db.questions.create_index("topic_id")
-        await db.questions.create_index("subject_id")
-        await db.questions.create_index("pdf_source_id")
-        await db.questions.create_index("favorite")
-        await db.questions.create_index("difficult")
-        await db.questions.create_index("srs_next_review")
-        await db.questions.create_index("question_type")
-        await db.questions.create_index([("times_answered", 1), ("times_correct", 1)])
-        await db.attempts.create_index("id", unique=True)
-        await db.attempts.create_index([("created_at", -1)])
-        await db.attempts.create_index("streak_day")
-        await db.flashcards.create_index("id", unique=True)
-        await db.flashcards.create_index("topic_id")
-        await db.flashcards.create_index("subject_id")
-        await db.flashcards.create_index("srs_next_review")
-        logger.info("MongoDB indices ensured.")
-    except Exception as e:
-        logger.warning("ensure_indices failed: %s", e)
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
-
 
 # ---------------------------------------------------------------------------
 # Flashcards
@@ -1591,3 +1526,69 @@ async def delete_flashcard(card_id: str):
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Flashcard no encontrada")
     return {"ok": True}
+
+
+# Register
+app.include_router(api)
+
+# --- CORS ---
+_BASELINE_ORIGINS = [
+    "https://impartial-passion-production-9090.up.railway.app",
+]
+_raw = os.environ.get("CORS_ORIGINS", "*")
+_env_origins = [o.strip() for o in _raw.split(",") if o.strip()]
+_allow_all = "*" in _env_origins
+_explicit_origins = sorted({*(o for o in _env_origins if o != "*"), *_BASELINE_ORIGINS})
+
+if _allow_all:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("[CORS] allow_origin_regex=.* (wildcard) baseline_extra=%s", _BASELINE_ORIGINS)
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_explicit_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("[CORS] explicit origins=%s", _explicit_origins)
+
+
+@app.on_event("startup")
+async def ensure_indices():
+    try:
+        await db.subjects.create_index("id", unique=True)
+        await db.topics.create_index("id", unique=True)
+        await db.topics.create_index("subject_id")
+        await db.pdfs.create_index("id", unique=True)
+        await db.pdfs.create_index("topic_id")
+        await db.questions.create_index("id", unique=True)
+        await db.questions.create_index("topic_id")
+        await db.questions.create_index("subject_id")
+        await db.questions.create_index("pdf_source_id")
+        await db.questions.create_index("favorite")
+        await db.questions.create_index("difficult")
+        await db.questions.create_index("srs_next_review")
+        await db.questions.create_index("question_type")
+        await db.questions.create_index([("times_answered", 1), ("times_correct", 1)])
+        await db.attempts.create_index("id", unique=True)
+        await db.attempts.create_index([("created_at", -1)])
+        await db.attempts.create_index("streak_day")
+        await db.flashcards.create_index("id", unique=True)
+        await db.flashcards.create_index("topic_id")
+        await db.flashcards.create_index("subject_id")
+        await db.flashcards.create_index("srs_next_review")
+        logger.info("MongoDB indices ensured.")
+    except Exception as e:
+        logger.warning("ensure_indices failed: %s", e)
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
