@@ -10,6 +10,10 @@ import {
     Sparkles,
     FileText,
     Layers,
+    BookOpenCheck,
+    ChevronDown,
+    ChevronUp,
+    Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -20,6 +24,7 @@ import {
     toggleDifficult as apiDiff,
     deleteQuestion,
     deletePdf,
+    generateTopicSummary,
 } from "@/lib/api";
 import GenerateDialog from "@/components/GenerateDialog";
 import AddPdfDialog from "@/components/AddPdfDialog";
@@ -33,6 +38,9 @@ export default function TopicDetail() {
     const [genOpen, setGenOpen] = useState(false);
     const [genDefault, setGenDefault] = useState(null);
     const [addOpen, setAddOpen] = useState(false);
+    const [summary, setSummary] = useState(null);
+    const [summaryOpen, setSummaryOpen] = useState(false);
+    const [summaryLoading, setSummaryLoading] = useState(false);
 
     const load = async () => {
         try {
@@ -86,6 +94,20 @@ export default function TopicDetail() {
         setPdfs((ps) => ps.filter((p) => p.id !== pid));
     };
 
+    const generateSummary = async () => {
+        if (summary) { setSummaryOpen(o => !o); return; }
+        setSummaryLoading(true);
+        try {
+            const data = await generateTopicSummary(topic.id);
+            setSummary(data);
+            setSummaryOpen(true);
+        } catch {
+            toast.error("Error al generar el resumen");
+        } finally {
+            setSummaryLoading(false);
+        }
+    };
+
     if (!topic) {
         return (
             <div className="max-w-4xl mx-auto px-5 md:px-8 py-10" style={{ color: "var(--text-muted)" }}>
@@ -117,6 +139,15 @@ export default function TopicDetail() {
                     </p>
                 </div>
                 <div className="flex gap-2">
+                    <button
+                        onClick={generateSummary}
+                        data-testid="summary-btn"
+                        className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
+                        style={{ borderColor: "var(--border)" }}
+                    >
+                        {summaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpenCheck className="w-4 h-4" />}
+                        Resumen IA
+                    </button>
                     <Link
                         to={`/temas/${topic.id}/flashcards`}
                         data-testid="flashcards-btn"
@@ -135,6 +166,47 @@ export default function TopicDetail() {
                     </Link>
                 </div>
             </div>
+
+            {/* AI Summary panel */}
+            {summaryOpen && summary && (
+                <div className="card-organic p-5 mb-6 fade-up" style={{ borderLeft: "3px solid var(--brand)" }}>
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="label-eyebrow flex items-center gap-2">
+                            <BookOpenCheck className="w-4 h-4" style={{ color: "var(--brand)" }} /> Resumen IA
+                        </span>
+                        <button onClick={() => setSummaryOpen(false)} className="text-xs hover:underline" style={{ color: "var(--text-muted)" }}>
+                            Cerrar
+                        </button>
+                    </div>
+                    {summary.overview && (
+                        <p className="text-sm mb-4 leading-relaxed" style={{ color: "var(--text-secondary)" }}>{summary.overview}</p>
+                    )}
+                    {summary.sections?.map((s, i) => (
+                        <div key={i} className="mb-3">
+                            <div className="font-display font-bold text-sm mb-1">{s.title}</div>
+                            <ul className="space-y-1">
+                                {s.points?.map((p, j) => (
+                                    <li key={j} className="text-sm flex gap-2" style={{ color: "var(--text-secondary)" }}>
+                                        <span style={{ color: "var(--brand)" }}>·</span>{p}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    ))}
+                    {summary.remember?.length > 0 && (
+                        <div className="mt-4 p-3 rounded-md" style={{ background: "var(--bg-secondary)" }}>
+                            <div className="text-xs font-bold mb-2" style={{ color: "var(--brand)" }}>💡 RECUERDA</div>
+                            <ul className="space-y-1">
+                                {summary.remember.map((r, i) => (
+                                    <li key={i} className="text-xs flex gap-2" style={{ color: "var(--text-secondary)" }}>
+                                        <span>→</span>{r}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* PDFs section */}
             <section className="mb-8">

@@ -13,6 +13,7 @@ import {
     ChevronRight,
     FolderOpen,
     Zap,
+    Swords,
 } from "lucide-react";
 import { toast } from "sonner";
 import { listSubjects, deleteSubject, getStats } from "@/lib/api";
@@ -189,6 +190,13 @@ export default function Dashboard() {
                         desc="Lo que toca repasar hoy"
                         badge={stats?.due_srs ?? 0}
                         testid="quick-srs"
+                    />
+                    <QuickMode
+                        to="/supervivencia"
+                        icon={Zap}
+                        title="Supervivencia"
+                        desc="3 vidas · racha de puntos"
+                        testid="quick-survival"
                     />
                 </div>
             </section>
