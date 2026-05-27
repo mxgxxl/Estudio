@@ -1274,7 +1274,7 @@ async def stats_overview():
         else:
             break
 
-    last_attempts = await db.attempts.find({}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    last_attempts = await db.attempts.find({}, {"_id": 0}).sort("created_at", -1).to_list(3)
 
     return {
         "total_subjects": total_subjects,
@@ -1598,6 +1598,9 @@ async def ensure_indices():
         await db.flashcards.create_index("topic_id")
         await db.flashcards.create_index("subject_id")
         await db.flashcards.create_index("srs_next_review")
+        await db.survival_records.create_index("id", unique=True)
+        await db.survival_records.create_index([("scope_type", 1), ("scope_id", 1)], unique=True)
+        await db.survival_records.create_index("score")
         logger.info("MongoDB indices ensured.")
     except Exception as e:
         logger.warning("ensure_indices failed: %s", e)
@@ -1606,3 +1609,176 @@ async def ensure_indices():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# ---------------------------------------------------------------------------
+# Survival Mode Records
+# ---------------------------------------------------------------------------
+class SurvivalRecord(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    scope_type: Literal["topic", "subject"]  # topic or subject
+    scope_id: str
+    scope_name: str
+    score: int
+    questions_answered: int
+    lives_lost: int
+    question_type: str  # mcq, tf, any
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+@api.get("/survival/records")
+async def get_survival_records():
+    """Get all survival mode records."""
+    records = await db.survival_records.find({}, {"_id": 0}).sort("score", -1).to_list(500)
+    return records
+
+
+@api.get("/survival/records/{scope_type}/{scope_id}")
+async def get_survival_record(scope_type: str, scope_id: str):
+    """Get best record for a topic or subject."""
+    record = await db.survival_records.find_one(
+        {"scope_type": scope_type, "scope_id": scope_id},
+        {"_id": 0}
+    )
+    return record or {}
+
+
+class SaveSurvivalRecordReq(BaseModel):
+    scope_type: Literal["topic", "subject"]
+    scope_id: str
+    scope_name: str
+    score: int
+    questions_answered: int
+    lives_lost: int
+    question_type: str
+
+
+@api.post("/survival/records")
+async def save_survival_record(req: SaveSurvivalRecordReq):
+    """Save survival record only if it beats the current best."""
+    existing = await db.survival_records.find_one(
+        {"scope_type": req.scope_type, "scope_id": req.scope_id},
+        {"_id": 0}
+    )
+    if existing and existing["score"] >= req.score:
+        return {"saved": False, "best_score": existing["score"], "new_record": False}
+
+    record = SurvivalRecord(
+        scope_type=req.scope_type,
+        scope_id=req.scope_id,
+        scope_name=req.scope_name,
+        score=req.score,
+        questions_answered=req.questions_answered,
+        lives_lost=req.lives_lost,
+        question_type=req.question_type,
+    )
+    if existing:
+        await db.survival_records.replace_one(
+            {"scope_type": req.scope_type, "scope_id": req.scope_id},
+            record.model_dump()
+        )
+    else:
+        await db.survival_records.insert_one(record.model_dump())
+
+    return {"saved": True, "best_score": req.score, "new_record": True}
+
+
+# ---------------------------------------------------------------------------
+# AI Topic Summary
+# ---------------------------------------------------------------------------
+@api.post("/topics/{topic_id}/summary")
+async def generate_topic_summary(topic_id: str):
+    """Generate a structured summary of a topic using AI."""
+    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+
+    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    if not pdfs:
+        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
+
+    if not GEMINI_API_KEY or gemini_client is None:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
+
+    combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text'][:30000]}" for p in pdfs])[:80000]
+
+    system_msg = (
+        "Eres un profesor experto. Genera un resumen estructurado y esquemático del temario. "
+        "Usa el vocabulario exacto del texto. Responde SIEMPRE en español. "
+        "Devuelve SOLO JSON válido."
+    )
+    prompt = f"""Resume el siguiente temario del tema "{topic['name']}" de forma estructurada.
+
+Devuelve SOLO este JSON:
+{{
+  "overview": "párrafo introductorio de 2-3 frases resumiendo el tema",
+  "key_concepts": [
+    {{"concept": "nombre del concepto", "explanation": "explicación breve de 1-2 frases"}}
+  ],
+  "sections": [
+    {{"title": "título de sección", "points": ["punto clave 1", "punto clave 2"]}}
+  ],
+  "remember": ["dato clave para recordar 1", "dato clave 2", "dato clave 3"]
+}}
+
+Incluye 5-8 conceptos clave, 3-5 secciones con 3-5 puntos cada una, y 3-5 datos para recordar.
+
+TEMARIO:
+\"\"\"
+{combined}
+\"\"\"
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_msg,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
+        raw = _strip_code_fences(response.text or "")
+        summary = json.loads(raw)
+        return summary
+    except Exception as e:
+        logger.error("Summary generation error: %s", e)
+        raise HTTPException(status_code=502, detail="Error al generar el resumen")
+
+
+# ---------------------------------------------------------------------------
+# Gap Detector
+# ---------------------------------------------------------------------------
+@api.get("/stats/gaps")
+async def get_knowledge_gaps():
+    """Identify topics and questions with accuracy below 60%."""
+    topics = await db.topics.find({}, {"_id": 0}).to_list(2000)
+    weak_topics = []
+    for t in topics:
+        agg = await db.questions.aggregate([
+            {"$match": {"topic_id": t["id"], "times_answered": {"$gt": 2}}},
+            {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}, "total": {"$sum": 1}}},
+        ]).to_list(1)
+        if agg and agg[0]["ans"] > 0:
+            accuracy = round(100 * agg[0]["ok"] / agg[0]["ans"], 1)
+            if accuracy < 60:
+                weak_topics.append({
+                    "topic_id": t["id"],
+                    "topic_name": t["name"],
+                    "subject_id": t.get("subject_id"),
+                    "accuracy": accuracy,
+                    "answered": agg[0]["ans"],
+                    "total_questions": agg[0]["total"],
+                })
+
+    # Also get weakest individual questions
+    weak_questions = await db.questions.find(
+        {"times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
+        {"_id": 0, "id": 1, "question": 1, "topic_name": 1, "times_answered": 1, "times_correct": 1}
+    ).sort([("times_answered", -1)]).to_list(20)
+
+    for q in weak_questions:
+        q["accuracy"] = round(100 * q["times_correct"] / q["times_answered"], 1) if q["times_answered"] else 0
+
+    weak_topics.sort(key=lambda x: x["accuracy"])
+    return {"weak_topics": weak_topics[:10], "weak_questions": weak_questions}
