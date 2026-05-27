@@ -45,7 +45,7 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("studyapp")
 
-logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
+logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s flashcards=enabled", GEMINI_MODEL, bool(GEMINI_API_KEY))
 
 
 # ---------------------------------------------------------------------------
