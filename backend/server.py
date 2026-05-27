@@ -1488,6 +1488,8 @@ async def generate_topic_flashcards(topic_id: str, num_cards: int = 15):
     await db.flashcards.delete_many({"topic_id": topic_id})
     if docs:
         await db.flashcards.insert_many(docs)
+        # Re-fetch to avoid ObjectId serialization issues
+        docs = await db.flashcards.find({"topic_id": topic_id}, {"_id": 0}).to_list(500)
 
     return {"flashcards_created": len(docs), "flashcards": docs}
 
