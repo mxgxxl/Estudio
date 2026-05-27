@@ -73,3 +73,17 @@ export const reviewFlashcard = (cardId, correct) =>
     api.post(`/flashcards/${cardId}/review?correct=${correct}`).then((r) => r.data);
 export const toggleFlashcardFavorite = (cardId) => api.post(`/flashcards/${cardId}/favorite`).then((r) => r.data);
 export const deleteFlashcard = (cardId) => api.delete(`/flashcards/${cardId}`).then((r) => r.data);
+
+// Survival records
+export const getSurvivalRecords = () => api.get("/survival/records").then((r) => r.data);
+export const getSurvivalRecord = (scopeType, scopeId) => api.get(\`/survival/records/\${scopeType}/\${scopeId}\`).then((r) => r.data);
+export const saveSurvivalRecord = (data) => api.post("/survival/records", data).then((r) => r.data);
+
+// Attempt history
+export const getAttempts = (limit = 50, skip = 0) => api.get(\`/attempts?limit=\${limit}&skip=\${skip}\`).then((r) => r.data);
+
+// AI Summary
+export const generateTopicSummary = (topicId) => api.post(\`/topics/\${topicId}/summary\`, {}, { timeout: 120000 }).then((r) => r.data);
+
+// Gap detector
+export const getKnowledgeGaps = () => api.get("/stats/gaps").then((r) => r.data);
