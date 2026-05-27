@@ -10,6 +10,7 @@ import QuizResults from "@/pages/QuizResults";
 import TopicDetail from "@/pages/TopicDetail";
 import Stats from "@/pages/Stats";
 import FlashcardMode from "@/pages/FlashcardMode";
+import SurvivalMode from "@/pages/SurvivalMode";
 
 function App() {
     return (
@@ -25,6 +26,7 @@ function App() {
                         <Route path="/temas/:id" element={<TopicDetail />} />
                         <Route path="/stats" element={<Stats />} />
                         <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
+                        <Route path="/supervivencia" element={<SurvivalMode />} />
                     </Route>
                 </Routes>
             </BrowserRouter>
