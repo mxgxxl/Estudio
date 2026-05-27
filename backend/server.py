@@ -153,8 +153,12 @@ def _strip_code_fences(s: str) -> str:
     return s.strip()
 
 
-def _build_prompts(topic_name: str, source_text: str, num_questions: int, question_type: str, num_options: int):
+def _build_prompts(topic_name: str, source_text: str, num_questions: int, question_type: str, num_options: int, custom_instructions: str = ""):
     """Builds the (system, user) prompt pair for a generation call."""
+    custom_note = ""
+    if custom_instructions:
+        custom_note = f"\n\nINSTRUCCIONES ADICIONALES DEL PROFESOR (prioridad máxima): {custom_instructions}"
+
     system_msg = (
         "Eres un profesor experto. Tu tarea es generar preguntas de examen "
         "de alta calidad EXCLUSIVAMENTE a partir del temario que se te proporciona. "
@@ -163,6 +167,7 @@ def _build_prompts(topic_name: str, source_text: str, num_questions: int, questi
         "NO parafrasees ni inventes datos: extrae directamente del texto. "
         "Responde SIEMPRE en español. "
         "Devuelve SOLO JSON válido, sin texto extra."
+        + custom_note
     )
     if question_type == "tf":
         user_prompt = f"""A partir del siguiente temario del tema "{topic_name}", \
@@ -364,10 +369,11 @@ async def _generate_batch(
     num_questions: int,
     question_type: str,
     num_options: int,
+    custom_instructions: str = "",
 ) -> List[dict]:
     import asyncio as _asyncio
     system_msg, user_prompt = _build_prompts(
-        topic_name, source_text, num_questions, question_type, num_options
+        topic_name, source_text, num_questions, question_type, num_options, custom_instructions
     )
 
     last_err: Optional[Exception] = None
@@ -408,6 +414,7 @@ async def generate_questions_with_claude(
     num_questions: int,
     question_type: str = "mcq",
     num_options: int = 3,
+    custom_instructions: str = "",
 ) -> List[dict]:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
@@ -431,7 +438,7 @@ async def generate_questions_with_claude(
     batch_errors = 0
     for i, batch_n in enumerate(batches):
         logger.info("Generating batch %s/%s (%s questions)…", i + 1, len(batches), batch_n)
-        items = await _generate_batch(topic_name, source_text, batch_n, question_type, num_options)
+        items = await _generate_batch(topic_name, source_text, batch_n, question_type, num_options, custom_instructions)
         if items:
             all_questions.extend(items)
         else:
@@ -704,6 +711,7 @@ async def upload_topic_pdf(
     num_questions: int = Form(20),
     question_type: str = Form("mcq"),
     num_options: int = Form(3),
+    custom_instructions: str = Form(""),
     file: UploadFile = File(...),
 ):
     subj = await db.subjects.find_one({"id": subject_id}, {"_id": 0})
@@ -742,7 +750,8 @@ async def upload_topic_pdf(
 
     try:
         generated = await generate_questions_with_claude(
-            topic.name, text, num_questions, question_type=qtype, num_options=nopts
+            topic.name, text, num_questions, question_type=qtype, num_options=nopts,
+            custom_instructions=custom_instructions or "",
         )
     except Exception:
         await db.topics.delete_one({"id": topic.id})
@@ -892,6 +901,7 @@ class GenerateFromPdfsReq(BaseModel):
     num_questions: int = 10
     question_type: Literal["mcq", "tf", "dev"] = "mcq"
     num_options: int = 3
+    custom_instructions: Optional[str] = None
 
 
 @api.post("/topics/{topic_id}/generate")
@@ -917,7 +927,9 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
 
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
     generated = await generate_questions_with_claude(
-        topic["name"], combined, req.num_questions, question_type=req.question_type, num_options=nopts
+        topic["name"], combined, req.num_questions,
+        question_type=req.question_type, num_options=nopts,
+        custom_instructions=req.custom_instructions or "",
     )
 
     primary_pdf_id = pdfs[0]["id"]
