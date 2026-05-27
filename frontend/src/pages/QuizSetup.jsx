@@ -26,6 +26,7 @@ const QTYPES = [
     { id: "any", label: "Cualquier tipo" },
     { id: "mcq", label: "Opción múltiple" },
     { id: "tf", label: "Verdadero/Falso" },
+    { id: "dev", label: "Desarrollo (IA evalúa)" },
 ];
 
 const PENALTIES = [

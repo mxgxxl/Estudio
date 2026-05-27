@@ -33,11 +33,8 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# NOTE: gemini-1.5-flash has been deprecated by Google. gemini-2.5-flash is its
-# direct successor (same speed/cost tier). Override via GEMINI_MODEL env if needed.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Single Gemini client instance reused across requests (google-genai SDK)
 gemini_client: Optional[genai.Client] = (
     genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 )
@@ -76,7 +73,7 @@ class PdfSource(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     topic_id: str
     filename: str
-    text: str  # extracted text, reused for regeneration
+    text: str
     char_count: int = 0
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -87,12 +84,13 @@ class Question(BaseModel):
     topic_name: str
     subject_id: Optional[str] = None
     pdf_source_id: Optional[str] = None
-    question_type: Literal["mcq", "tf"] = "mcq"
+    question_type: Literal["mcq", "tf", "dev"] = "mcq"
     num_options: int = 3
     question: str
     options: List[str]
     correct_index: int
     explanation: Optional[str] = ""
+    model_answer: Optional[str] = ""   # Para preguntas de desarrollo
     favorite: bool = False
     difficult: bool = False
     times_answered: int = 0
@@ -112,17 +110,18 @@ class Attempt(BaseModel):
     subject_ids: List[str] = []
     topic_ids: List[str] = []
     question_ids: List[str]
-    answers: List[int]  # selected option index per question, -1 if unanswered
+    answers: List[int]
     correct_count: int
     wrong_count: int = 0
     unanswered_count: int = 0
     total: int
-    penalty_factor: Optional[int] = None  # e.g., 3 => 3 wrong = -1 correct. None = no penalty.
-    raw_score: float = 0.0  # correct - wrong/penalty_factor (if penalty applied), else == correct
+    penalty_factor: Optional[int] = None
+    raw_score: float = 0.0
     score_10: float = 0.0
-    question_type: Optional[str] = None  # filter used at start
+    question_type: Optional[str] = None
     duration_seconds: int = 0
     time_limit_seconds: Optional[int] = None
+    streak_day: Optional[str] = None  # ISO date for streak tracking
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -141,7 +140,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     for page in reader.pages:
         try:
             parts.append(page.extract_text() or "")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("PDF page extract error: %s", e)
     return _clean_pdf_text("\n\n".join(parts))
 
@@ -159,8 +158,10 @@ def _build_prompts(topic_name: str, source_text: str, num_questions: int, questi
     system_msg = (
         "Eres un profesor experto. Tu tarea es generar preguntas de examen "
         "de alta calidad EXCLUSIVAMENTE a partir del temario que se te proporciona. "
-        "Las preguntas deben ser claras, específicas y útiles para preparar un examen "
-        "universitario o de oposición. Responde SIEMPRE en español. "
+        "Las preguntas, respuestas correctas e incorrectas deben usar el vocabulario "
+        "exacto, términos técnicos y frases literales del temario proporcionado. "
+        "NO parafrasees ni inventes datos: extrae directamente del texto. "
+        "Responde SIEMPRE en español. "
         "Devuelve SOLO JSON válido, sin texto extra."
     )
     if question_type == "tf":
@@ -170,9 +171,9 @@ genera exactamente {num_questions} preguntas tipo VERDADERO/FALSO.
 REGLAS ESTRICTAS:
 - Cada pregunta es una AFIRMACIÓN que el alumno debe juzgar como verdadera o falsa.
 - Varía entre afirmaciones verdaderas y falsas (aprox 50/50).
-- Las afirmaciones deben estar basadas únicamente en el contenido proporcionado.
-- Las falsas deben ser plausibles (cambiar un dato específico, no algo absurdo).
-- Incluye una explicación breve (1-2 frases) que justifique la respuesta.
+- Las afirmaciones deben usar frases o datos LITERALES del temario proporcionado.
+- Las falsas deben modificar un dato específico del texto (un número, nombre o concepto concreto).
+- Incluye una explicación breve (1-2 frases) con la referencia exacta del temario.
 - Evita preguntas triviales o duplicadas.
 - Devuelve SOLO un array JSON, sin markdown, sin comentarios.
 
@@ -181,7 +182,33 @@ FORMATO EXACTO:
   {{
     "question": "afirmación a juzgar",
     "correct": true,
-    "explanation": "breve justificación"
+    "explanation": "breve justificación citando el temario"
+  }}
+]
+
+TEMARIO:
+\"\"\"
+{source_text}
+\"\"\"
+"""
+    elif question_type == "dev":
+        user_prompt = f"""A partir del siguiente temario del tema "{topic_name}", \
+genera exactamente {num_questions} preguntas de DESARROLLO (respuesta abierta).
+
+REGLAS ESTRICTAS:
+- Cada pregunta debe requerir una respuesta elaborada de 3-6 frases.
+- Las preguntas deben cubrir conceptos clave del temario.
+- Proporciona una respuesta modelo completa basada LITERALMENTE en el temario.
+- Incluye los puntos clave que debe mencionar el alumno.
+- Evita preguntas duplicadas o triviales.
+- Devuelve SOLO un array JSON, sin markdown, sin comentarios.
+
+FORMATO EXACTO:
+[
+  {{
+    "question": "pregunta de desarrollo",
+    "model_answer": "respuesta modelo completa con los puntos clave",
+    "key_points": ["punto 1", "punto 2", "punto 3"]
   }}
 ]
 
@@ -197,10 +224,11 @@ genera exactamente {num_questions} preguntas tipo test.
 
 REGLAS ESTRICTAS:
 - Cada pregunta debe tener EXACTAMENTE {n} opciones de respuesta.
-- Solo UNA opción es correcta. Las demás deben ser plausibles pero claramente incorrectas según el temario.
-- Las preguntas y respuestas deben estar basadas únicamente en el contenido proporcionado.
+- Solo UNA opción es correcta. Las demás deben ser plausibles pero incorrectas según el temario.
+- Las preguntas y respuestas deben usar el vocabulario y términos EXACTOS del temario.
+- Las opciones incorrectas deben basarse en datos reales del temario pero modificando algún detalle.
 - Varía la dificultad y los conceptos cubiertos.
-- Incluye una explicación breve (1-2 frases) que justifique la respuesta correcta.
+- Incluye una explicación breve (1-2 frases) citando el texto del temario.
 - Evita preguntas triviales o duplicadas.
 - Devuelve SOLO un array JSON, sin markdown, sin comentarios.
 
@@ -210,7 +238,7 @@ FORMATO EXACTO:
     "question": "texto de la pregunta",
     "options": [{', '.join([f'"opción {chr(65 + i)}"' for i in range(n)])}],
     "correct_index": 0,
-    "explanation": "breve justificación"
+    "explanation": "breve justificación citando el temario"
   }}
 ]
 
@@ -223,7 +251,6 @@ TEMARIO:
 
 
 def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[dict]:
-    """Parse and normalise LLM response into validated question dicts."""
     raw = _strip_code_fences(raw)
     try:
         data = json.loads(raw)
@@ -260,6 +287,25 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
                 "explanation": str(q.get("explanation", "")).strip(),
                 "question_type": "tf",
                 "num_options": 2,
+                "model_answer": "",
+            })
+    elif question_type == "dev":
+        for q in data:
+            if not isinstance(q, dict):
+                continue
+            text = str(q.get("question", "")).strip()
+            model_answer = str(q.get("model_answer", "")).strip()
+            key_points = q.get("key_points", [])
+            if not text or not model_answer:
+                continue
+            cleaned.append({
+                "question": text,
+                "options": [],
+                "correct_index": 0,
+                "explanation": "; ".join(key_points) if key_points else "",
+                "question_type": "dev",
+                "num_options": 0,
+                "model_answer": model_answer,
             })
     else:
         n = max(2, min(5, int(num_options)))
@@ -285,12 +331,12 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
                 "explanation": str(q.get("explanation", "")).strip(),
                 "question_type": "mcq",
                 "num_options": n,
+                "model_answer": "",
             })
     return cleaned
 
 
 async def _call_gemini(system_msg: str, user_prompt: str) -> str:
-    """Single call to Gemini using google-genai SDK (async)."""
     logger.info("[LLM-CALL] provider=gemini model=%s prompt_chars=%s", GEMINI_MODEL, len(user_prompt))
     if gemini_client is None:
         raise RuntimeError("GEMINI_API_KEY no configurada — gemini_client es None")
@@ -319,7 +365,6 @@ async def _generate_batch(
     question_type: str,
     num_options: int,
 ) -> List[dict]:
-    """Generate a single batch with retries against Gemini."""
     import asyncio as _asyncio
     system_msg, user_prompt = _build_prompts(
         topic_name, source_text, num_questions, question_type, num_options
@@ -335,7 +380,7 @@ async def _generate_batch(
                 logger.info("[LLM-PARSED] provider=gemini questions=%s", len(parsed))
                 return parsed
             logger.warning("[LLM-PARSE-EMPTY] attempt=%s/%s — parsed 0 questions", attempt + 1, attempts)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last_err = e
             msg = str(e).lower()
             is_transient = any(
@@ -350,7 +395,6 @@ async def _generate_batch(
                 attempt + 1, attempts, is_transient, str(e)[:300],
             )
             if not is_transient and attempt == 0:
-                # Non-transient error → stop retrying immediately
                 break
         await _asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
     if last_err:
@@ -365,16 +409,13 @@ async def generate_questions_with_claude(
     question_type: str = "mcq",
     num_options: int = 3,
 ) -> List[dict]:
-    """Robustly generate `num_questions` items in small batches with Gemini."""
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
 
-    # Truncate very long PDFs (safe context)
     max_chars = 120_000
     if len(source_text) > max_chars:
         source_text = source_text[:max_chars]
 
-    # Split big requests into batches of <=10 to reduce risk of partial failures
     BATCH_SIZE = 10
     if num_questions <= BATCH_SIZE:
         batches = [num_questions]
@@ -405,10 +446,53 @@ async def generate_questions_with_claude(
                 "El proveedor puede estar saturado. Vuelve a intentarlo en unos segundos."
             ),
         )
-    if batch_errors and batch_errors == len(batches):
-        # Should be unreachable given the all_questions check above, kept for safety
-        raise HTTPException(status_code=502, detail="Fallo total al generar preguntas")
     return all_questions
+
+
+# Evaluate a development answer using Gemini
+async def evaluate_dev_answer(question: str, model_answer: str, user_answer: str, key_points: str) -> dict:
+    """Use Gemini to evaluate a development answer and return score + feedback."""
+    if not GEMINI_API_KEY or gemini_client is None:
+        return {"score": 0, "feedback": "IA no disponible para evaluar", "key_points_covered": []}
+
+    system_msg = (
+        "Eres un corrector experto. Evalúa la respuesta del alumno comparándola con la respuesta modelo. "
+        "Sé justo y constructivo. Responde SOLO con JSON válido."
+    )
+    prompt = f"""Evalúa esta respuesta de desarrollo:
+
+PREGUNTA: {question}
+
+RESPUESTA MODELO: {model_answer}
+
+PUNTOS CLAVE ESPERADOS: {key_points}
+
+RESPUESTA DEL ALUMNO: {user_answer}
+
+Devuelve SOLO este JSON:
+{{
+  "score": <número del 0 al 10>,
+  "feedback": "<retroalimentación constructiva de 2-3 frases>",
+  "key_points_covered": ["<puntos que ha mencionado>"],
+  "key_points_missing": ["<puntos que faltan>"]
+}}"""
+
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_msg,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
+        raw = _strip_code_fences(response.text or "")
+        result = json.loads(raw)
+        return result
+    except Exception as e:
+        logger.error("Dev answer eval error: %s", e)
+        return {"score": 0, "feedback": "Error al evaluar", "key_points_covered": [], "key_points_missing": []}
 
 
 def _now_iso() -> str:
@@ -425,7 +509,6 @@ async def root():
 
 @api.get("/diag/llm")
 async def diag_llm():
-    """Diagnostic endpoint: shows the AI provider configured."""
     return {
         "provider": "gemini",
         "model": GEMINI_MODEL,
@@ -435,7 +518,6 @@ async def diag_llm():
 
 @api.post("/diag/llm-test")
 async def diag_llm_test():
-    """Ping Gemini and return whether it responds."""
     if gemini_client is None:
         return {"ok": False, "detail": "GEMINI_API_KEY not configured"}
     try:
@@ -445,7 +527,7 @@ async def diag_llm_test():
         )
         text = resp.text or ""
         return {"ok": True, "model": GEMINI_MODEL, "response_head": text[:80]}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {
             "ok": False,
             "model": GEMINI_MODEL,
@@ -454,9 +536,7 @@ async def diag_llm_test():
         }
 
 
-# ---- Migration helper (called on demand) ----
 async def _ensure_default_subject_and_migrate() -> str:
-    """If there are topics without subject_id, create a default subject and assign them."""
     orphan = await db.topics.find_one({"subject_id": {"$in": [None, ""]}}, {"_id": 0})
     if orphan is None:
         orphan = await db.topics.find_one({"subject_id": {"$exists": False}}, {"_id": 0})
@@ -542,7 +622,6 @@ async def update_subject(subject_id: str, req: SubjectUpdate):
 
 @api.delete("/subjects/{subject_id}")
 async def delete_subject(subject_id: str):
-    # Collect topic ids first so we can cascade pdfs properly
     topic_ids = [t["id"] async for t in db.topics.find({"subject_id": subject_id}, {"_id": 0, "id": 1})]
     res = await db.subjects.delete_one({"id": subject_id})
     await db.topics.delete_many({"subject_id": subject_id})
@@ -575,7 +654,6 @@ async def list_topics_for_subject(subject_id: str):
 # ---- Topics ----
 @api.get("/topics")
 async def list_topics():
-    """Global topics list. Kept for backwards compat / Stats page."""
     await _ensure_default_subject_and_migrate()
     topics = await db.topics.find({}, {"_id": 0}).sort("created_at", 1).to_list(2000)
     for t in topics:
@@ -607,6 +685,18 @@ async def get_topic(topic_id: str):
     return t
 
 
+@api.get("/topics/{topic_id}/text")
+async def get_topic_text(topic_id: str):
+    """Return combined PDF text for a topic (used in study mode with temario visible)."""
+    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    if not pdfs:
+        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
+    parts = []
+    for p in pdfs:
+        parts.append(f"=== {p['filename']} ===\n{p['text']}")
+    return {"topic_id": topic_id, "text": "\n\n".join(parts), "sources": [p["filename"] for p in pdfs]}
+
+
 @api.post("/subjects/{subject_id}/topics/upload")
 async def upload_topic_pdf(
     subject_id: str,
@@ -623,13 +713,13 @@ async def upload_topic_pdf(
         raise HTTPException(status_code=400, detail="Solo se aceptan ficheros PDF")
     if num_questions < 3 or num_questions > 80:
         raise HTTPException(status_code=400, detail="num_questions debe estar entre 3 y 80")
-    qtype = question_type if question_type in ("mcq", "tf") else "mcq"
+    qtype = question_type if question_type in ("mcq", "tf", "dev") else "mcq"
     nopts = max(2, min(5, int(num_options))) if qtype == "mcq" else 2
 
     pdf_bytes = await file.read()
     try:
         text = extract_pdf_text(pdf_bytes)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al leer el PDF: {e}") from e
 
     if len(text) < 200:
@@ -677,6 +767,7 @@ async def upload_topic_pdf(
             options=g["options"],
             correct_index=g["correct_index"],
             explanation=g.get("explanation", ""),
+            model_answer=g.get("model_answer", ""),
         )
         docs.append(q.model_dump())
     if docs:
@@ -716,7 +807,7 @@ async def list_topic_pdfs(topic_id: str):
 
 class RegenerateReq(BaseModel):
     num_questions: int = 10
-    question_type: Literal["mcq", "tf"] = "mcq"
+    question_type: Literal["mcq", "tf", "dev"] = "mcq"
     num_options: int = 3
 
 
@@ -748,6 +839,7 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq):
             options=g["options"],
             correct_index=g["correct_index"],
             explanation=g.get("explanation", ""),
+            model_answer=g.get("model_answer", ""),
         )
         docs.append(q.model_dump())
     if docs:
@@ -760,14 +852,12 @@ async def delete_pdf(pdf_id: str):
     res = await db.pdfs.delete_one({"id": pdf_id})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
-    # questions remain (pdf_source_id is just a reference)
     await db.questions.update_many({"pdf_source_id": pdf_id}, {"$set": {"pdf_source_id": None}})
     return {"ok": True}
 
 
 @api.post("/topics/{topic_id}/pdfs/upload")
 async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
-    """Add a new PDF to an existing topic WITHOUT generating questions immediately."""
     topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
@@ -776,7 +866,7 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     try:
         text = extract_pdf_text(pdf_bytes)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al leer el PDF: {e}") from e
     if len(text) < 200:
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
@@ -800,13 +890,12 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
 class GenerateFromPdfsReq(BaseModel):
     pdf_ids: List[str]
     num_questions: int = 10
-    question_type: Literal["mcq", "tf"] = "mcq"
+    question_type: Literal["mcq", "tf", "dev"] = "mcq"
     num_options: int = 3
 
 
 @api.post("/topics/{topic_id}/generate")
 async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
-    """Generate questions for a topic by combining text from selected PDFs."""
     topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
@@ -821,7 +910,6 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
     if not pdfs:
         raise HTTPException(status_code=404, detail="No se encontraron PDFs")
 
-    # Combine PDF texts with clear separators
     parts = []
     for p in pdfs:
         parts.append(f"=== Fuente: {p['filename']} ===\n{p['text']}")
@@ -846,6 +934,7 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
             options=g["options"],
             correct_index=g["correct_index"],
             explanation=g.get("explanation", ""),
+            model_answer=g.get("model_answer", ""),
         )
         docs.append(q.model_dump())
     if docs:
@@ -874,12 +963,56 @@ async def toggle_difficult(question_id: str):
     return {"difficult": new_val}
 
 
+class EditQuestionReq(BaseModel):
+    question: Optional[str] = None
+    options: Optional[List[str]] = None
+    correct_index: Optional[int] = None
+    explanation: Optional[str] = None
+    model_answer: Optional[str] = None
+
+
+@api.patch("/questions/{question_id}")
+async def edit_question(question_id: str, req: EditQuestionReq):
+    """Edit a question manually."""
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    res = await db.questions.update_one({"id": question_id}, {"$set": fields})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Pregunta no encontrada")
+    return {"ok": True}
+
+
 @api.delete("/questions/{question_id}")
 async def delete_question(question_id: str):
     res = await db.questions.delete_one({"id": question_id})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     return {"ok": True}
+
+
+# ---- Development question evaluation ----
+class EvalDevReq(BaseModel):
+    question_id: str
+    user_answer: str
+
+
+@api.post("/quiz/eval-dev")
+async def eval_dev_answer(req: EvalDevReq):
+    """Evaluate a development answer using AI."""
+    q = await db.questions.find_one({"id": req.question_id}, {"_id": 0})
+    if not q:
+        raise HTTPException(status_code=404, detail="Pregunta no encontrada")
+    if q.get("question_type") != "dev":
+        raise HTTPException(status_code=400, detail="Solo para preguntas de desarrollo")
+
+    result = await evaluate_dev_answer(
+        q["question"],
+        q.get("model_answer", ""),
+        req.user_answer,
+        q.get("explanation", ""),
+    )
+    return result
 
 
 # ---- Quiz ----
@@ -889,8 +1022,8 @@ class QuizStartReq(BaseModel):
     topic_ids: List[str] = []
     num_questions: int = 20
     time_limit_minutes: Optional[int] = None
-    question_type: Optional[Literal["mcq", "tf", "any"]] = "any"
-    num_options: Optional[int] = None  # filter exact num_options for mcq, None = any
+    question_type: Optional[Literal["mcq", "tf", "dev", "any"]] = "any"
+    num_options: Optional[int] = None
 
 
 @api.post("/quiz/start")
@@ -922,29 +1055,61 @@ async def quiz_start(req: QuizStartReq):
 
     payload = []
     for q in questions:
+        qtype = q.get("question_type", "mcq")
         n = int(q.get("num_options") or len(q.get("options", []) or []))
-        if q.get("question_type") == "tf":
-            shuffled_options = q["options"]
-            new_correct = q["correct_index"]
+
+        if qtype == "dev":
+            payload.append({
+                "id": q["id"],
+                "topic_id": q["topic_id"],
+                "topic_name": q["topic_name"],
+                "subject_id": q.get("subject_id"),
+                "question_type": "dev",
+                "num_options": 0,
+                "question": q["question"],
+                "options": [],
+                "correct_index": 0,
+                "explanation": q.get("explanation", ""),
+                "model_answer": q.get("model_answer", ""),
+                "favorite": q.get("favorite", False),
+                "difficult": q.get("difficult", False),
+            })
+        elif qtype == "tf":
+            payload.append({
+                "id": q["id"],
+                "topic_id": q["topic_id"],
+                "topic_name": q["topic_name"],
+                "subject_id": q.get("subject_id"),
+                "question_type": "tf",
+                "num_options": n,
+                "question": q["question"],
+                "options": q["options"],
+                "correct_index": q["correct_index"],
+                "explanation": q.get("explanation", ""),
+                "model_answer": "",
+                "favorite": q.get("favorite", False),
+                "difficult": q.get("difficult", False),
+            })
         else:
             order = list(range(n))
             random.shuffle(order)
             shuffled_options = [q["options"][i] for i in order]
             new_correct = order.index(q["correct_index"])
-        payload.append({
-            "id": q["id"],
-            "topic_id": q["topic_id"],
-            "topic_name": q["topic_name"],
-            "subject_id": q.get("subject_id"),
-            "question_type": q.get("question_type", "mcq"),
-            "num_options": n,
-            "question": q["question"],
-            "options": shuffled_options,
-            "correct_index": new_correct,
-            "explanation": q.get("explanation", ""),
-            "favorite": q.get("favorite", False),
-            "difficult": q.get("difficult", False),
-        })
+            payload.append({
+                "id": q["id"],
+                "topic_id": q["topic_id"],
+                "topic_name": q["topic_name"],
+                "subject_id": q.get("subject_id"),
+                "question_type": "mcq",
+                "num_options": n,
+                "question": q["question"],
+                "options": shuffled_options,
+                "correct_index": new_correct,
+                "explanation": q.get("explanation", ""),
+                "model_answer": "",
+                "favorite": q.get("favorite", False),
+                "difficult": q.get("difficult", False),
+            })
     return {"questions": payload, "mode": req.mode}
 
 
@@ -952,15 +1117,14 @@ class QuizSubmitReq(BaseModel):
     mode: Literal["exam", "practice", "errors", "srs", "favorites"]
     subject_ids: List[str] = []
     topic_ids: List[str] = []
-    answers: List[dict]  # [{"question_id": str, "selected": int, "correct_index": int}]
+    answers: List[dict]
     duration_seconds: int
     time_limit_seconds: Optional[int] = None
-    penalty_factor: Optional[int] = None  # None = no penalty; otherwise X wrong = -1 correct
+    penalty_factor: Optional[int] = None
     question_type: Optional[str] = None
 
 
 def _update_srs(q: dict, correct: bool) -> dict:
-    """Simplified SM-2."""
     ease = float(q.get("srs_ease", 2.5))
     interval = float(q.get("srs_interval_days", 0))
     if correct:
@@ -988,10 +1152,19 @@ async def quiz_submit(req: QuizSubmitReq):
         qid = a.get("question_id")
         selected = int(a.get("selected", -1))
         correct_index = int(a.get("correct_index", -1))
-        if selected == -1:
+        qtype = a.get("question_type", "mcq")
+
+        if selected == -1 and qtype != "dev":
             unanswered += 1
             continue
-        is_correct = selected == correct_index
+
+        if qtype == "dev":
+            # Dev answers are evaluated separately; count as answered
+            dev_score = float(a.get("dev_score", 0))
+            is_correct = dev_score >= 5
+        else:
+            is_correct = selected == correct_index
+
         if is_correct:
             correct += 1
         else:
@@ -1001,7 +1174,7 @@ async def quiz_submit(req: QuizSubmitReq):
         if not q:
             continue
         update = {
-            "$inc": {"times_answered": 1, **({"times_correct": 1} if is_correct else {})},
+            "$inc": {"times_answered": 1, **(({"times_correct": 1}) if is_correct else {})},
             "$set": {
                 "last_answered_at": _now_iso(),
                 "last_correct": is_correct,
@@ -1010,7 +1183,6 @@ async def quiz_submit(req: QuizSubmitReq):
         }
         await db.questions.update_one({"id": qid}, update)
 
-    # Score calculation with optional penalty
     pf = req.penalty_factor
     if pf and pf > 0:
         raw = correct - (wrong / pf)
@@ -1021,6 +1193,7 @@ async def quiz_submit(req: QuizSubmitReq):
     score_10 = round((raw / total) * 10, 2) if total else 0.0
     raw_score = round(raw, 3)
 
+    today = datetime.now(timezone.utc).date().isoformat()
     attempt = Attempt(
         mode=req.mode,
         subject_ids=req.subject_ids,
@@ -1037,6 +1210,7 @@ async def quiz_submit(req: QuizSubmitReq):
         question_type=req.question_type,
         duration_seconds=req.duration_seconds,
         time_limit_seconds=req.time_limit_seconds,
+        streak_day=today,
     )
     await db.attempts.insert_one(attempt.model_dump())
     return {
@@ -1075,6 +1249,19 @@ async def stats_overview():
     now = _now_iso()
     due_srs = await db.questions.count_documents({"srs_next_review": {"$lte": now}, "times_answered": {"$gt": 0}})
 
+    # Streak calculation
+    today = datetime.now(timezone.utc).date()
+    streak = 0
+    check_date = today
+    for _ in range(365):
+        day_str = check_date.isoformat()
+        count = await db.attempts.count_documents({"streak_day": day_str})
+        if count > 0:
+            streak += 1
+            check_date = check_date - timedelta(days=1)
+        else:
+            break
+
     last_attempts = await db.attempts.find({}, {"_id": 0}).sort("created_at", -1).to_list(10)
 
     return {
@@ -1088,6 +1275,7 @@ async def stats_overview():
         "difficult": difficult,
         "errors_pool": errors_pool,
         "due_srs": due_srs,
+        "streak": streak,
         "last_attempts": last_attempts,
     }
 
@@ -1174,8 +1362,6 @@ async def stats_by_topic():
 app.include_router(api)
 
 # --- CORS ---
-# Always allow these baseline origins so the app keeps working even if the
-# CORS_ORIGINS env var is missing in production (e.g., Railway).
 _BASELINE_ORIGINS = [
     "https://impartial-passion-production-9090.up.railway.app",
 ]
@@ -1185,9 +1371,6 @@ _allow_all = "*" in _env_origins
 _explicit_origins = sorted({*(o for o in _env_origins if o != "*"), *_BASELINE_ORIGINS})
 
 if _allow_all:
-    # When using "*", credentials cannot be true per CORS spec. We allow any
-    # origin via regex so that browsers accept it; FastAPI then echoes the
-    # request Origin back, which works even with allow_credentials=False.
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=".*",
@@ -1209,17 +1392,12 @@ else:
 
 @app.on_event("startup")
 async def ensure_indices():
-    """Create indices for scaling to many subjects / topics / PDFs / questions."""
     try:
-        # subjects
         await db.subjects.create_index("id", unique=True)
-        # topics
         await db.topics.create_index("id", unique=True)
         await db.topics.create_index("subject_id")
-        # pdfs
         await db.pdfs.create_index("id", unique=True)
         await db.pdfs.create_index("topic_id")
-        # questions
         await db.questions.create_index("id", unique=True)
         await db.questions.create_index("topic_id")
         await db.questions.create_index("subject_id")
@@ -1229,14 +1407,187 @@ async def ensure_indices():
         await db.questions.create_index("srs_next_review")
         await db.questions.create_index("question_type")
         await db.questions.create_index([("times_answered", 1), ("times_correct", 1)])
-        # attempts
         await db.attempts.create_index("id", unique=True)
         await db.attempts.create_index([("created_at", -1)])
+        await db.attempts.create_index("streak_day")
+        await db.flashcards.create_index("id", unique=True)
+        await db.flashcards.create_index("topic_id")
+        await db.flashcards.create_index("subject_id")
+        await db.flashcards.create_index("srs_next_review")
         logger.info("MongoDB indices ensured.")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("ensure_indices failed: %s", e)
 
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# ---------------------------------------------------------------------------
+# Flashcards
+# ---------------------------------------------------------------------------
+class Flashcard(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    topic_id: str
+    topic_name: str
+    subject_id: Optional[str] = None
+    term: str
+    definition: str
+    example: Optional[str] = ""
+    favorite: bool = False
+    times_reviewed: int = 0
+    times_correct: int = 0
+    srs_interval_days: float = 0
+    srs_ease: float = 2.5
+    srs_next_review: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+async def _generate_flashcards_from_text(topic_name: str, source_text: str, num_cards: int) -> List[dict]:
+    """Use Gemini to extract key concepts as flashcards from PDF text."""
+    if not GEMINI_API_KEY or gemini_client is None:
+        return []
+
+    max_chars = 80_000
+    if len(source_text) > max_chars:
+        source_text = source_text[:max_chars]
+
+    system_msg = (
+        "Eres un profesor experto. Extrae los conceptos clave del temario como tarjetas de estudio. "
+        "Usa el vocabulario exacto del texto. Responde SOLO con JSON válido."
+    )
+    prompt = f"""Del siguiente temario del tema "{topic_name}", extrae exactamente {num_cards} conceptos clave como flashcards.
+
+REGLAS:
+- El "term" debe ser un concepto, término técnico, estructura, proceso o dato clave del temario.
+- La "definition" debe ser la explicación literal del temario (2-4 frases).
+- El "example" es opcional: un ejemplo concreto del texto si existe, si no deja vacío.
+- Cubre los conceptos más importantes del tema, no repitas.
+- Devuelve SOLO el array JSON.
+
+FORMATO:
+[
+  {{
+    "term": "nombre del concepto",
+    "definition": "definición extraída del temario",
+    "example": "ejemplo del texto o vacío"
+  }}
+]
+
+TEMARIO:
+\"\"\"
+{source_text}
+\"\"\"
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_msg,
+                response_mime_type="application/json",
+                temperature=0.5,
+            ),
+        )
+        raw = _strip_code_fences(response.text or "")
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return []
+        cards = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            term = str(item.get("term", "")).strip()
+            definition = str(item.get("definition", "")).strip()
+            if term and definition:
+                cards.append({
+                    "term": term,
+                    "definition": definition,
+                    "example": str(item.get("example", "")).strip(),
+                })
+        return cards
+    except Exception as e:
+        logger.error("Flashcard generation error: %s", e)
+        return []
+
+
+@api.get("/topics/{topic_id}/flashcards")
+async def get_topic_flashcards(topic_id: str):
+    """Return existing flashcards for a topic."""
+    cards = await db.flashcards.find({"topic_id": topic_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return cards
+
+
+@api.post("/topics/{topic_id}/flashcards/generate")
+async def generate_topic_flashcards(topic_id: str, num_cards: int = 15):
+    """Generate flashcards from the topic's PDF text using AI."""
+    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+
+    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    if not pdfs:
+        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
+
+    combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text']}" for p in pdfs])
+    num_cards = max(5, min(30, num_cards))
+
+    cards = await _generate_flashcards_from_text(topic["name"], combined, num_cards)
+    if not cards:
+        raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
+
+    docs = []
+    for c in cards:
+        fc = Flashcard(
+            topic_id=topic_id,
+            topic_name=topic["name"],
+            subject_id=topic.get("subject_id"),
+            term=c["term"],
+            definition=c["definition"],
+            example=c.get("example", ""),
+        )
+        docs.append(fc.model_dump())
+
+    # Replace existing flashcards for this topic
+    await db.flashcards.delete_many({"topic_id": topic_id})
+    if docs:
+        await db.flashcards.insert_many(docs)
+
+    return {"flashcards_created": len(docs), "flashcards": docs}
+
+
+@api.post("/flashcards/{card_id}/review")
+async def review_flashcard(card_id: str, correct: bool):
+    """Mark a flashcard as correct or incorrect and update SRS."""
+    card = await db.flashcards.find_one({"id": card_id}, {"_id": 0})
+    if not card:
+        raise HTTPException(status_code=404, detail="Flashcard no encontrada")
+
+    srs = _update_srs(card, correct)
+    await db.flashcards.update_one(
+        {"id": card_id},
+        {
+            "$inc": {"times_reviewed": 1, **(({"times_correct": 1}) if correct else {})},
+            "$set": {"last_reviewed_at": _now_iso(), **srs},
+        },
+    )
+    return {"ok": True}
+
+
+@api.post("/flashcards/{card_id}/favorite")
+async def toggle_flashcard_favorite(card_id: str):
+    card = await db.flashcards.find_one({"id": card_id}, {"_id": 0})
+    if not card:
+        raise HTTPException(status_code=404, detail="Flashcard no encontrada")
+    new_val = not card.get("favorite", False)
+    await db.flashcards.update_one({"id": card_id}, {"$set": {"favorite": new_val}})
+    return {"favorite": new_val}
+
+
+@api.delete("/flashcards/{card_id}")
+async def delete_flashcard(card_id: str):
+    res = await db.flashcards.delete_one({"id": card_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Flashcard no encontrada")
+    return {"ok": True}

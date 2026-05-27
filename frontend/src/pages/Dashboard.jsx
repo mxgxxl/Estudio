@@ -12,6 +12,7 @@ import {
     Clock,
     ChevronRight,
     FolderOpen,
+    Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { listSubjects, deleteSubject, getStats } from "@/lib/api";
@@ -143,11 +144,12 @@ export default function Dashboard() {
                 </div>
             </section>
 
-            <section className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+            <section className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-10">
                 <StatCard icon={FolderOpen} label="Asignaturas" value={stats?.total_subjects ?? "—"} />
                 <StatCard icon={BookOpen} label="Temas" value={stats?.total_topics ?? "—"} />
                 <StatCard icon={Target} label="Preguntas" value={stats?.total_questions ?? "—"} />
                 <StatCard icon={BarChart3} label="Precisión" value={stats ? `${stats.accuracy}%` : "—"} />
+                <StatCard icon={Zap} label="Racha" value={stats ? `${stats.streak ?? 0}d` : "—"} />
             </section>
 
             <section className="mb-12">

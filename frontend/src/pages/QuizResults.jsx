@@ -1,6 +1,50 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Check, X, RotateCcw, Home, Sparkles, MinusCircle } from "lucide-react";
+import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
+
+function DevReviewCard({ question, devScore }) {
+    const [showModel, setShowModel] = useState(false);
+    const score = devScore ?? 0;
+    const passed = score >= 5;
+
+    return (
+        <div className="space-y-2">
+            <div
+                className="flex items-center justify-between px-3 py-2 rounded-md"
+                style={{ background: passed ? "#eef2ec" : "#fbeeee" }}
+            >
+                <span className="text-sm font-medium" style={{ color: passed ? "var(--sage)" : "var(--error)" }}>
+                    Puntuación obtenida
+                </span>
+                <span className="font-display font-bold text-xl" style={{ color: passed ? "var(--sage)" : "var(--error)" }}>
+                    {score}/10
+                </span>
+            </div>
+            <button
+                onClick={() => setShowModel(o => !o)}
+                className="flex items-center gap-1 text-xs font-medium hover:underline"
+                style={{ color: "var(--brand)" }}
+            >
+                <BookOpen className="w-3 h-3" />
+                {showModel ? "Ocultar" : "Ver"} respuesta modelo
+                {showModel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+            {showModel && question.model_answer && (
+                <div
+                    className="rounded-md p-3 text-sm leading-relaxed"
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                >
+                    {question.model_answer}
+                </div>
+            )}
+            {question.explanation && (
+                <div className="text-xs italic" style={{ color: "var(--text-muted)" }}>
+                    Puntos clave: {question.explanation}
+                </div>
+            )}
+        </div>
+    );
+}
 
 export default function QuizResults() {
     const navigate = useNavigate();
@@ -8,10 +52,7 @@ export default function QuizResults() {
 
     useEffect(() => {
         const raw = sessionStorage.getItem("quiz_result");
-        if (!raw) {
-            navigate("/");
-            return;
-        }
+        if (!raw) { navigate("/"); return; }
         setData(JSON.parse(raw));
     }, [navigate]);
 
@@ -27,9 +68,15 @@ export default function QuizResults() {
         penalty_factor,
         questions,
         answers,
+        devScores = {},
     } = data;
+
     const pct = total ? Math.round((correct / total) * 100) : 0;
     const passed = score_10 >= 5;
+
+    // Separate questions by type for the summary
+    const devQuestions = questions.filter(q => q.question_type === "dev");
+    const hasDevQuestions = devQuestions.length > 0;
 
     return (
         <div className="max-w-3xl mx-auto px-5 md:px-8 py-8 md:py-12">
@@ -38,6 +85,7 @@ export default function QuizResults() {
                 {passed ? "¡Bien hecho!" : "Sigue así, repasa los fallos"}
             </h1>
 
+            {/* Score cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                 <div className="card-organic p-5 fade-up" data-testid="result-score">
                     <span className="label-eyebrow">
@@ -48,9 +96,7 @@ export default function QuizResults() {
                         style={{ color: passed ? "var(--sage)" : "var(--error)" }}
                     >
                         {score_10}
-                        <span className="text-2xl" style={{ color: "var(--text-muted)" }}>
-                            /10
-                        </span>
+                        <span className="text-2xl" style={{ color: "var(--text-muted)" }}>/10</span>
                     </div>
                     {penalty_factor && (
                         <div className="text-xs mt-1 font-mono" style={{ color: "var(--text-muted)" }}>
@@ -64,30 +110,21 @@ export default function QuizResults() {
                         <div>
                             <Check className="w-4 h-4 mx-auto" style={{ color: "var(--sage)" }} />
                             <div className="font-display text-2xl font-bold mt-1">{correct}</div>
-                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                                Aciertos
-                            </div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>Aciertos</div>
                         </div>
                         <div>
                             <X className="w-4 h-4 mx-auto" style={{ color: "var(--error)" }} />
                             <div className="font-display text-2xl font-bold mt-1">{wrong}</div>
-                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                                Fallos
-                            </div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>Fallos</div>
                         </div>
                         <div>
                             <MinusCircle className="w-4 h-4 mx-auto" style={{ color: "var(--text-muted)" }} />
                             <div className="font-display text-2xl font-bold mt-1">{unanswered}</div>
-                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                                Blanco
-                            </div>
+                            <div className="text-xs" style={{ color: "var(--text-muted)" }}>Blanco</div>
                         </div>
                     </div>
                     <div className="progress-track mt-3">
-                        <div
-                            className="progress-fill"
-                            style={{ width: `${pct}%`, background: "var(--sage)" }}
-                        />
+                        <div className="progress-fill" style={{ width: `${pct}%`, background: "var(--sage)" }} />
                     </div>
                     <div className="text-xs mt-1 font-mono text-right" style={{ color: "var(--text-muted)" }}>
                         {pct}% aciertos
@@ -95,6 +132,21 @@ export default function QuizResults() {
                 </div>
             </div>
 
+            {/* Dev questions summary if any */}
+            {hasDevQuestions && (
+                <div className="card-organic p-5 fade-up mb-6">
+                    <span className="label-eyebrow block mb-2">Preguntas de desarrollo</span>
+                    <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                        Respondiste {devQuestions.length} pregunta{devQuestions.length > 1 ? "s" : ""} de desarrollo.
+                        Puntuación media:{" "}
+                        <strong>
+                            {(devQuestions.reduce((acc, q) => acc + (devScores[q.id] ?? 0), 0) / devQuestions.length).toFixed(1)}/10
+                        </strong>
+                    </div>
+                </div>
+            )}
+
+            {/* Actions */}
             <div className="flex flex-wrap gap-3 mb-10">
                 <Link to="/" className="btn-primary inline-flex items-center gap-2" data-testid="back-home-btn">
                     <Home className="w-4 h-4" /> Inicio
@@ -116,23 +168,27 @@ export default function QuizResults() {
                 </Link>
             </div>
 
-            <span className="label-eyebrow block mb-3">Revisión</span>
+            {/* Review per question */}
+            <span className="label-eyebrow block mb-3">Revisión pregunta a pregunta</span>
             <div className="space-y-3">
                 {questions.map((q, i) => {
                     const sel = answers[i];
-                    const isUnanswered = sel === -1;
-                    const ok = sel === q.correct_index && !isUnanswered;
+                    const isDevQ = q.question_type === "dev";
+                    const devScore = devScores[q.id];
+                    const isUnanswered = !isDevQ && sel === -1;
+                    const ok = isDevQ
+                        ? (devScore ?? 0) >= 5
+                        : sel === q.correct_index && !isUnanswered;
+
                     return (
                         <div key={q.id} className="card-organic p-4 md:p-5 fade-up" data-testid={`review-q-${i}`}>
                             <div className="flex items-start gap-3">
                                 <span
-                                    className="w-7 h-7 rounded-md flex items-center justify-center shrink-0"
+                                    className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 mt-0.5"
                                     style={{
                                         background: isUnanswered
                                             ? "var(--bg-secondary)"
-                                            : ok
-                                              ? "#eef2ec"
-                                              : "#fbeeee",
+                                            : ok ? "#eef2ec" : "#fbeeee",
                                     }}
                                 >
                                     {isUnanswered ? (
@@ -146,51 +202,47 @@ export default function QuizResults() {
                                 <div className="flex-1">
                                     <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
                                         {q.topic_name} · Pregunta {i + 1} ·{" "}
-                                        {q.question_type === "tf" ? "V/F" : "Test"}
+                                        {isDevQ ? "Desarrollo" : q.question_type === "tf" ? "V/F" : "Test"}
                                     </div>
-                                    <div className="font-display font-bold text-base md:text-lg leading-snug mb-2">
+                                    <div className="font-display font-bold text-base md:text-lg leading-snug mb-3">
                                         {q.question}
                                     </div>
-                                    <ul className="space-y-1 text-sm">
-                                        {q.options.map((opt, oi) => {
-                                            const isCorrect = oi === q.correct_index;
-                                            const isSelected = oi === sel;
-                                            return (
-                                                <li
-                                                    key={oi}
-                                                    className="flex items-start gap-2 px-2 py-1 rounded"
-                                                    style={{
-                                                        background: isCorrect
-                                                            ? "#eef2ec"
-                                                            : isSelected
-                                                              ? "#fbeeee"
-                                                              : "transparent",
-                                                        color: isCorrect
-                                                            ? "var(--sage)"
-                                                            : isSelected
-                                                              ? "var(--error)"
-                                                              : "var(--text-secondary)",
-                                                    }}
-                                                >
-                                                    <span className="kbd" style={{ background: "white" }}>
-                                                        {q.question_type === "tf"
-                                                            ? oi === 0
-                                                                ? "V"
-                                                                : "F"
-                                                            : String.fromCharCode(65 + oi)}
-                                                    </span>
-                                                    <span className="flex-1">{opt}</span>
-                                                </li>
-                                            );
-                                        })}
-                                    </ul>
-                                    {q.explanation && (
-                                        <div
-                                            className="mt-2 text-xs italic"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            {q.explanation}
-                                        </div>
+
+                                    {/* Development question review */}
+                                    {isDevQ ? (
+                                        <DevReviewCard question={q} devScore={devScore} />
+                                    ) : (
+                                        <>
+                                            <ul className="space-y-1 text-sm">
+                                                {q.options.map((opt, oi) => {
+                                                    const isCorrect = oi === q.correct_index;
+                                                    const isSelected = oi === sel;
+                                                    return (
+                                                        <li
+                                                            key={oi}
+                                                            className="flex items-start gap-2 px-2 py-1 rounded"
+                                                            style={{
+                                                                background: isCorrect ? "#eef2ec" : isSelected ? "#fbeeee" : "transparent",
+                                                                color: isCorrect ? "var(--sage)" : isSelected ? "var(--error)" : "var(--text-secondary)",
+                                                            }}
+                                                        >
+                                                            <span className="kbd" style={{ background: "white" }}>
+                                                                {q.question_type === "tf"
+                                                                    ? oi === 0 ? "V" : "F"
+                                                                    : String.fromCharCode(65 + oi)}
+                                                            </span>
+                                                            <span className="flex-1">{opt}</span>
+                                                            {isCorrect && <Check className="w-3.5 h-3.5 shrink-0 mt-0.5" style={{ color: "var(--sage)" }} />}
+                                                        </li>
+                                                    );
+                                                })}
+                                            </ul>
+                                            {q.explanation && (
+                                                <div className="mt-2 text-xs italic" style={{ color: "var(--text-muted)" }}>
+                                                    {q.explanation}
+                                                </div>
+                                            )}
+                                        </>
                                     )}
                                 </div>
                             </div>

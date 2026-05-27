@@ -9,6 +9,7 @@ import QuizRun from "@/pages/QuizRun";
 import QuizResults from "@/pages/QuizResults";
 import TopicDetail from "@/pages/TopicDetail";
 import Stats from "@/pages/Stats";
+import FlashcardMode from "@/pages/FlashcardMode";
 
 function App() {
     return (
@@ -23,6 +24,7 @@ function App() {
                         <Route path="/quiz/results" element={<QuizResults />} />
                         <Route path="/temas/:id" element={<TopicDetail />} />
                         <Route path="/stats" element={<Stats />} />
+                        <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
                     </Route>
                 </Routes>
             </BrowserRouter>

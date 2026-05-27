@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, ChevronRight, Flag, Star, AlertCircle, Clock, MinusCircle } from "lucide-react";
+import {
+    Check, X, ChevronRight, Flag, Star, AlertCircle, Clock,
+    MinusCircle, BookOpen, ChevronDown, ChevronUp, Pencil, Send, Loader2
+} from "lucide-react";
 import { toast } from "sonner";
-import { quizSubmit, toggleFavorite as apiFav, toggleDifficult as apiDiff } from "@/lib/api";
+import { quizSubmit, toggleFavorite as apiFav, toggleDifficult as apiDiff, api } from "@/lib/api";
 
 const MODE_LABELS = {
     practice: "Práctica",
@@ -18,22 +21,227 @@ function formatTime(sec) {
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+// Panel de temario desplegable
+function TemarioPanel({ topicId, topicName }) {
+    const [open, setOpen] = useState(false);
+    const [text, setText] = useState(null);
+    const [loading, setLoading] = useState(false);
+
+    const load = useCallback(async () => {
+        if (text !== null) { setOpen(o => !o); return; }
+        setLoading(true);
+        try {
+            const res = await api.get(`/topics/${topicId}/text`);
+            setText(res.data.text);
+            setOpen(true);
+        } catch {
+            toast.error("No se pudo cargar el temario");
+        } finally {
+            setLoading(false);
+        }
+    }, [topicId, text]);
+
+    return (
+        <div className="mb-4 rounded-md border overflow-hidden" style={{ borderColor: "var(--border)" }}>
+            <button
+                onClick={load}
+                className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-[color:var(--bg-secondary)] transition-colors"
+                style={{ background: "var(--bg-secondary)" }}
+            >
+                <span className="flex items-center gap-2">
+                    <BookOpen className="w-4 h-4" style={{ color: "var(--brand)" }} />
+                    Ver temario: {topicName}
+                </span>
+                {loading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" style={{ color: "var(--text-muted)" }} />
+                ) : open ? (
+                    <ChevronUp className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
+                ) : (
+                    <ChevronDown className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
+                )}
+            </button>
+            {open && text && (
+                <div
+                    className="px-4 py-3 text-sm leading-relaxed max-h-64 overflow-y-auto whitespace-pre-wrap"
+                    style={{ color: "var(--text-secondary)", borderTop: "1px solid var(--border)" }}
+                >
+                    {text}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// Componente para preguntas de desarrollo
+function DevQuestion({ question, onAnswer, revealed, devResult, devLoading }) {
+    const [userAnswer, setUserAnswer] = useState("");
+
+    return (
+        <div className="space-y-4">
+            <textarea
+                value={userAnswer}
+                onChange={e => setUserAnswer(e.target.value)}
+                disabled={revealed}
+                placeholder="Escribe tu respuesta aquí..."
+                className="w-full h-36 p-3 rounded-md border text-sm resize-none focus:outline-none focus:ring-1"
+                style={{
+                    borderColor: "var(--border)",
+                    background: revealed ? "var(--bg-secondary)" : "white",
+                    color: "var(--text-primary)",
+                    focusRingColor: "var(--brand)"
+                }}
+            />
+            {!revealed && (
+                <button
+                    onClick={() => onAnswer(userAnswer)}
+                    disabled={!userAnswer.trim() || devLoading}
+                    className="btn-primary flex items-center gap-2 text-sm"
+                >
+                    {devLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    Evaluar respuesta
+                </button>
+            )}
+            {revealed && devResult && (
+                <div className="space-y-3 fade-up">
+                    <div
+                        className="rounded-md p-4 border"
+                        style={{
+                            borderColor: devResult.score >= 5 ? "var(--sage)" : "var(--error)",
+                            background: devResult.score >= 5 ? "#eef2ec" : "#fbeeee"
+                        }}
+                    >
+                        <div className="flex items-center justify-between mb-2">
+                            <span className="font-display font-bold text-sm">Tu puntuación</span>
+                            <span className="font-display font-bold text-2xl" style={{
+                                color: devResult.score >= 5 ? "var(--sage)" : "var(--error)"
+                            }}>
+                                {devResult.score}/10
+                            </span>
+                        </div>
+                        <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{devResult.feedback}</p>
+                        {devResult.key_points_missing?.length > 0 && (
+                            <div className="mt-2">
+                                <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>
+                                    Puntos que faltaron:
+                                </p>
+                                <ul className="list-disc list-inside text-xs space-y-0.5" style={{ color: "var(--text-secondary)" }}>
+                                    {devResult.key_points_missing.map((p, i) => <li key={i}>{p}</li>)}
+                                </ul>
+                            </div>
+                        )}
+                    </div>
+                    <div className="rounded-md p-4 border" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}>
+                        <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>Respuesta modelo:</p>
+                        <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{question.model_answer}</p>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// Modal de edición de pregunta
+function EditModal({ question, onClose, onSaved }) {
+    const [text, setText] = useState(question.question);
+    const [options, setOptions] = useState([...question.options]);
+    const [correctIdx, setCorrectIdx] = useState(question.correct_index);
+    const [explanation, setExplanation] = useState(question.explanation || "");
+    const [saving, setSaving] = useState(false);
+
+    const save = async () => {
+        setSaving(true);
+        try {
+            await api.patch(`/questions/${question.id}`, {
+                question: text,
+                options,
+                correct_index: correctIdx,
+                explanation,
+            });
+            toast.success("Pregunta actualizada");
+            onSaved({ ...question, question: text, options, correct_index: correctIdx, explanation });
+            onClose();
+        } catch {
+            toast.error("Error al guardar");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.4)" }}>
+            <div className="w-full max-w-lg rounded-xl p-6 shadow-xl" style={{ background: "white" }}>
+                <h3 className="font-display font-bold text-lg mb-4">Editar pregunta</h3>
+                <div className="space-y-3">
+                    <div>
+                        <label className="text-xs font-medium block mb-1" style={{ color: "var(--text-muted)" }}>Pregunta</label>
+                        <textarea
+                            value={text}
+                            onChange={e => setText(e.target.value)}
+                            className="w-full h-20 p-2 rounded border text-sm resize-none"
+                            style={{ borderColor: "var(--border)" }}
+                        />
+                    </div>
+                    {options.map((opt, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCorrectIdx(i)}
+                                className="w-6 h-6 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
+                                style={{
+                                    borderColor: correctIdx === i ? "var(--sage)" : "var(--border)",
+                                    background: correctIdx === i ? "var(--sage)" : "white"
+                                }}
+                            >
+                                {correctIdx === i && <Check className="w-3 h-3 text-white" />}
+                            </button>
+                            <input
+                                value={opt}
+                                onChange={e => { const o = [...options]; o[i] = e.target.value; setOptions(o); }}
+                                className="flex-1 p-2 rounded border text-sm"
+                                style={{ borderColor: "var(--border)" }}
+                            />
+                        </div>
+                    ))}
+                    <div>
+                        <label className="text-xs font-medium block mb-1" style={{ color: "var(--text-muted)" }}>Explicación</label>
+                        <textarea
+                            value={explanation}
+                            onChange={e => setExplanation(e.target.value)}
+                            className="w-full h-16 p-2 rounded border text-sm resize-none"
+                            style={{ borderColor: "var(--border)" }}
+                        />
+                    </div>
+                </div>
+                <div className="flex justify-end gap-2 mt-4">
+                    <button onClick={onClose} className="px-4 py-2 text-sm border rounded-md" style={{ borderColor: "var(--border)" }}>
+                        Cancelar
+                    </button>
+                    <button onClick={save} disabled={saving} className="btn-primary text-sm flex items-center gap-1">
+                        {saving && <Loader2 className="w-3 h-3 animate-spin" />} Guardar
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function QuizRun() {
     const navigate = useNavigate();
     const [quiz, setQuiz] = useState(null);
     const [idx, setIdx] = useState(0);
     const [answers, setAnswers] = useState([]);
+    const [devScores, setDevScores] = useState({}); // { questionId: score }
     const [revealed, setRevealed] = useState(false);
+    const [devResult, setDevResult] = useState(null);
+    const [devLoading, setDevLoading] = useState(false);
     const [elapsed, setElapsed] = useState(0);
+    const [showTemario, setShowTemario] = useState(false);
+    const [editOpen, setEditOpen] = useState(false);
     const startedRef = useRef(Date.now());
     const submittedRef = useRef(false);
 
     useEffect(() => {
         const raw = sessionStorage.getItem("current_quiz");
-        if (!raw) {
-            navigate("/quiz/setup");
-            return;
-        }
+        if (!raw) { navigate("/quiz/setup"); return; }
         const q = JSON.parse(raw);
         setQuiz(q);
         setAnswers(new Array(q.questions.length).fill(-1));
@@ -48,6 +256,7 @@ export default function QuizRun() {
     }, []);
 
     const isExam = quiz?.mode === "exam";
+    const isPractice = !isExam;
     const timeLeft = useMemo(() => {
         if (!quiz?.time_limit_seconds) return null;
         return Math.max(0, quiz.time_limit_seconds - elapsed);
@@ -65,6 +274,8 @@ export default function QuizRun() {
                     question_id: qq.id,
                     selected: answers[i] ?? -1,
                     correct_index: qq.correct_index,
+                    question_type: qq.question_type,
+                    dev_score: devScores[qq.id] ?? 0,
                 })),
                 duration_seconds: Math.floor((Date.now() - startedRef.current) / 1000),
                 time_limit_seconds: quiz.time_limit_seconds || null,
@@ -72,15 +283,13 @@ export default function QuizRun() {
                 question_type: quiz.question_type || null,
             };
             const res = await quizSubmit(payload);
-            sessionStorage.setItem(
-                "quiz_result",
-                JSON.stringify({
-                    ...res,
-                    questions: quiz.questions,
-                    answers,
-                    mode: quiz.mode,
-                }),
-            );
+            sessionStorage.setItem("quiz_result", JSON.stringify({
+                ...res,
+                questions: quiz.questions,
+                answers,
+                devScores,
+                mode: quiz.mode,
+            }));
             navigate("/quiz/results");
         } catch {
             toast.error("Error al enviar el examen");
@@ -89,35 +298,48 @@ export default function QuizRun() {
     };
 
     useEffect(() => {
-        if (isExam && timeLeft === 0 && !submittedRef.current) {
-            handleSubmit();
-        }
+        if (isExam && timeLeft === 0 && !submittedRef.current) handleSubmit();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [timeLeft, isExam]);
 
     if (!quiz) return null;
     const q = quiz.questions[idx];
     const selected = answers[idx];
+    const isDevQ = q.question_type === "dev";
+    const isTF = q.question_type === "tf";
 
     const onSelect = (optIdx) => {
         if (isExam) {
-            const next = [...answers];
-            next[idx] = optIdx;
-            setAnswers(next);
+            const next = [...answers]; next[idx] = optIdx; setAnswers(next);
         } else {
             if (revealed) return;
-            const next = [...answers];
-            next[idx] = optIdx;
-            setAnswers(next);
+            const next = [...answers]; next[idx] = optIdx; setAnswers(next);
             setRevealed(true);
+        }
+    };
+
+    const onDevAnswer = async (userAnswer) => {
+        if (!userAnswer.trim()) return;
+        setDevLoading(true);
+        try {
+            const res = await api.post("/quiz/eval-dev", {
+                question_id: q.id,
+                user_answer: userAnswer,
+            });
+            setDevResult(res.data);
+            setDevScores(prev => ({ ...prev, [q.id]: res.data.score }));
+            const next = [...answers]; next[idx] = 0; setAnswers(next); // mark as answered
+            setRevealed(true);
+        } catch {
+            toast.error("Error al evaluar la respuesta");
+        } finally {
+            setDevLoading(false);
         }
     };
 
     const onClearAnswer = () => {
         if (!isExam) return;
-        const next = [...answers];
-        next[idx] = -1;
-        setAnswers(next);
+        const next = [...answers]; next[idx] = -1; setAnswers(next);
     };
 
     const onNext = () => {
@@ -125,7 +347,9 @@ export default function QuizRun() {
             handleSubmit();
         } else {
             setIdx(idx + 1);
-            setRevealed(false);
+            setRevealed(isExam ? false : answers[idx + 1] !== -1);
+            setDevResult(null);
+            setShowTemario(false);
         }
     };
 
@@ -133,6 +357,8 @@ export default function QuizRun() {
         if (idx > 0) {
             setIdx(idx - 1);
             setRevealed(isExam ? false : answers[idx - 1] !== -1);
+            setDevResult(null);
+            setShowTemario(false);
         }
     };
 
@@ -141,34 +367,35 @@ export default function QuizRun() {
             const { favorite } = await apiFav(q.id);
             quiz.questions[idx] = { ...q, favorite };
             setQuiz({ ...quiz });
-        } catch {
-            toast.error("Error");
-        }
+        } catch { toast.error("Error"); }
     };
+
     const toggleDiff = async () => {
         try {
             const { difficult } = await apiDiff(q.id);
             quiz.questions[idx] = { ...q, difficult };
             setQuiz({ ...quiz });
-        } catch {
-            toast.error("Error");
-        }
+        } catch { toast.error("Error"); }
+    };
+
+    const onQuestionEdited = (updated) => {
+        quiz.questions[idx] = updated;
+        setQuiz({ ...quiz });
     };
 
     const answeredCount = answers.filter((a) => a !== -1).length;
-    const isTF = q.question_type === "tf";
+    const canGoNext = isDevQ ? revealed : (isExam ? true : revealed);
 
     return (
         <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
+            {/* Header */}
             <header
                 className="border-b sticky top-0 z-30 backdrop-blur"
                 style={{ borderColor: "var(--border)", background: "rgba(253,251,247,0.92)" }}
             >
                 <div className="max-w-3xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
                     <button
-                        onClick={() => {
-                            if (window.confirm("¿Salir? Perderás el progreso.")) navigate("/");
-                        }}
+                        onClick={() => { if (window.confirm("¿Salir? Perderás el progreso.")) navigate("/"); }}
                         data-testid="exit-quiz-btn"
                         className="text-sm font-medium hover:underline"
                         style={{ color: "var(--text-secondary)" }}
@@ -180,10 +407,7 @@ export default function QuizRun() {
                             {idx + 1} / {quiz.questions.length}
                         </span>
                         {quiz.penalty_factor && (
-                            <span
-                                className="font-mono text-xs px-2 py-1 rounded-md"
-                                style={{ background: "#fdf1ea", color: "var(--brand)" }}
-                            >
+                            <span className="font-mono text-xs px-2 py-1 rounded-md" style={{ background: "#fdf1ea", color: "var(--brand)" }}>
                                 −1/{quiz.penalty_factor}
                             </span>
                         )}
@@ -201,138 +425,103 @@ export default function QuizRun() {
                             </span>
                         )}
                         {!isExam && (
-                            <span
-                                className="font-mono text-xs px-2 py-1 rounded-md"
-                                style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
-                            >
+                            <span className="font-mono text-xs px-2 py-1 rounded-md" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
                                 {MODE_LABELS[quiz.mode]}
                             </span>
                         )}
                     </div>
                 </div>
                 <div className="progress-track" style={{ borderRadius: 0, height: 3 }}>
-                    <div
-                        className="progress-fill"
-                        style={{ width: `${((idx + 1) / quiz.questions.length) * 100}%` }}
-                    />
+                    <div className="progress-fill" style={{ width: `${((idx + 1) / quiz.questions.length) * 100}%` }} />
                 </div>
             </header>
 
             <main className="flex-1 max-w-3xl mx-auto w-full px-5 py-8">
                 <div className="fade-up" key={idx}>
+                    {/* Temario panel (solo en modo práctica) */}
+                    {isPractice && (
+                        <TemarioPanel topicId={q.topic_id} topicName={q.topic_name} />
+                    )}
+
+                    {/* Cabecera pregunta */}
                     <div className="flex items-center justify-between mb-3">
                         <span className="label-eyebrow">
-                            {q.topic_name} · {isTF ? "Verdadero/Falso" : `Opción múltiple`}
+                            {q.topic_name} · {isDevQ ? "Desarrollo" : isTF ? "Verdadero/Falso" : "Opción múltiple"}
                         </span>
                         <div className="flex gap-1">
                             <button
-                                onClick={toggleFav}
-                                data-testid="toggle-fav-btn"
+                                onClick={() => setEditOpen(true)}
                                 className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]"
-                                title="Favorita"
+                                title="Editar pregunta"
                             >
-                                <Star
-                                    className="w-4 h-4"
-                                    fill={q.favorite ? "var(--warning)" : "none"}
-                                    style={{ color: q.favorite ? "var(--warning)" : "var(--text-muted)" }}
-                                />
+                                <Pencil className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
                             </button>
-                            <button
-                                onClick={toggleDiff}
-                                data-testid="toggle-diff-btn"
-                                className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]"
-                                title="Difícil"
-                            >
-                                <Flag
-                                    className="w-4 h-4"
-                                    fill={q.difficult ? "var(--error)" : "none"}
-                                    style={{ color: q.difficult ? "var(--error)" : "var(--text-muted)" }}
-                                />
+                            <button onClick={toggleFav} data-testid="toggle-fav-btn" className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]" title="Favorita">
+                                <Star className="w-4 h-4" fill={q.favorite ? "var(--warning)" : "none"} style={{ color: q.favorite ? "var(--warning)" : "var(--text-muted)" }} />
+                            </button>
+                            <button onClick={toggleDiff} data-testid="toggle-diff-btn" className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]" title="Difícil">
+                                <Flag className="w-4 h-4" fill={q.difficult ? "var(--error)" : "none"} style={{ color: q.difficult ? "var(--error)" : "var(--text-muted)" }} />
                             </button>
                         </div>
                     </div>
-                    <h2 className="font-display text-xl md:text-2xl font-bold mb-6 leading-snug">
-                        {q.question}
-                    </h2>
 
-                    <div className={`mb-6 ${isTF ? "grid grid-cols-2 gap-3" : "space-y-3"}`}>
-                        {q.options.map((opt, i) => {
-                            const isSelected = selected === i;
-                            const isCorrect = i === q.correct_index;
-                            let cls = "option-pill";
-                            if (revealed) {
-                                if (isCorrect) cls += " correct";
-                                else if (isSelected) cls += " wrong";
-                            } else if (isSelected) {
-                                cls += " selected";
-                            }
-                            return (
-                                <button
-                                    key={i}
-                                    onClick={() => onSelect(i)}
-                                    disabled={revealed && !isExam}
-                                    data-testid={`option-${i}`}
-                                    className={cls}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <span
-                                            className="kbd"
-                                            style={{
-                                                minWidth: "1.5rem",
-                                                textAlign: "center",
-                                                background: "white",
-                                            }}
-                                        >
-                                            {isTF ? (i === 0 ? "V" : "F") : String.fromCharCode(65 + i)}
-                                        </span>
-                                        <span className="flex-1 text-sm md:text-base">{opt}</span>
-                                        {revealed && isCorrect && (
-                                            <Check className="w-4 h-4" style={{ color: "var(--sage)" }} />
-                                        )}
-                                        {revealed && isSelected && !isCorrect && (
-                                            <X className="w-4 h-4" style={{ color: "var(--error)" }} />
-                                        )}
-                                    </div>
-                                </button>
-                            );
-                        })}
-                    </div>
+                    <h2 className="font-display text-xl md:text-2xl font-bold mb-6 leading-snug">{q.question}</h2>
 
-                    {isExam && selected !== -1 && quiz.penalty_factor && (
-                        <button
-                            onClick={onClearAnswer}
-                            data-testid="clear-answer-btn"
-                            className="text-xs flex items-center gap-1 mb-4 hover:underline"
-                            style={{ color: "var(--text-muted)" }}
-                        >
-                            <MinusCircle className="w-3 h-3" /> Dejar en blanco (no penaliza)
-                        </button>
-                    )}
-
-                    {revealed && q.explanation && (
-                        <div
-                            className="rounded-md p-4 border flex gap-3 fade-up mb-6"
-                            style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
-                            data-testid="explanation-box"
-                        >
-                            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
-                            <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                                <strong className="font-display" style={{ color: "var(--text-primary)" }}>
-                                    Explicación:
-                                </strong>{" "}
-                                {q.explanation}
+                    {/* Pregunta de desarrollo */}
+                    {isDevQ ? (
+                        <DevQuestion
+                            question={q}
+                            onAnswer={onDevAnswer}
+                            revealed={revealed}
+                            devResult={devResult}
+                            devLoading={devLoading}
+                        />
+                    ) : (
+                        <>
+                            <div className={`mb-6 ${isTF ? "grid grid-cols-2 gap-3" : "space-y-3"}`}>
+                                {q.options.map((opt, i) => {
+                                    const isSelected = selected === i;
+                                    const isCorrect = i === q.correct_index;
+                                    let cls = "option-pill";
+                                    if (revealed) {
+                                        if (isCorrect) cls += " correct";
+                                        else if (isSelected) cls += " wrong";
+                                    } else if (isSelected) {
+                                        cls += " selected";
+                                    }
+                                    return (
+                                        <button key={i} onClick={() => onSelect(i)} disabled={revealed && !isExam} data-testid={`option-${i}`} className={cls}>
+                                            <div className="flex items-center gap-3">
+                                                <span className="kbd" style={{ minWidth: "1.5rem", textAlign: "center", background: "white" }}>
+                                                    {isTF ? (i === 0 ? "V" : "F") : String.fromCharCode(65 + i)}
+                                                </span>
+                                                <span className="flex-1 text-sm md:text-base">{opt}</span>
+                                                {revealed && isCorrect && <Check className="w-4 h-4" style={{ color: "var(--sage)" }} />}
+                                                {revealed && isSelected && !isCorrect && <X className="w-4 h-4" style={{ color: "var(--error)" }} />}
+                                            </div>
+                                        </button>
+                                    );
+                                })}
                             </div>
-                        </div>
+                            {isExam && selected !== -1 && quiz.penalty_factor && (
+                                <button onClick={onClearAnswer} data-testid="clear-answer-btn" className="text-xs flex items-center gap-1 mb-4 hover:underline" style={{ color: "var(--text-muted)" }}>
+                                    <MinusCircle className="w-3 h-3" /> Dejar en blanco (no penaliza)
+                                </button>
+                            )}
+                            {revealed && q.explanation && (
+                                <div className="rounded-md p-4 border flex gap-3 fade-up mb-6" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }} data-testid="explanation-box">
+                                    <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
+                                    <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                                        <strong className="font-display" style={{ color: "var(--text-primary)" }}>Explicación:</strong>{" "}{q.explanation}
+                                    </div>
+                                </div>
+                            )}
+                        </>
                     )}
 
-                    <div className="flex items-center justify-between gap-3">
-                        <button
-                            onClick={onPrev}
-                            disabled={idx === 0}
-                            data-testid="prev-btn"
-                            className="px-4 py-2 rounded-md border font-medium text-sm disabled:opacity-40"
-                            style={{ borderColor: "var(--border)" }}
-                        >
+                    {/* Navegación */}
+                    <div className="flex items-center justify-between gap-3 mt-6">
+                        <button onClick={onPrev} disabled={idx === 0} data-testid="prev-btn" className="px-4 py-2 rounded-md border font-medium text-sm disabled:opacity-40" style={{ borderColor: "var(--border)" }}>
                             Anterior
                         </button>
                         <span className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>
@@ -340,29 +529,14 @@ export default function QuizRun() {
                         </span>
                         {isExam ? (
                             idx + 1 === quiz.questions.length ? (
-                                <button
-                                    onClick={handleSubmit}
-                                    data-testid="submit-exam-btn"
-                                    className="btn-primary flex items-center gap-2 text-sm"
-                                >
-                                    Finalizar
-                                </button>
+                                <button onClick={handleSubmit} data-testid="submit-exam-btn" className="btn-primary flex items-center gap-2 text-sm">Finalizar</button>
                             ) : (
-                                <button
-                                    onClick={onNext}
-                                    data-testid="next-btn"
-                                    className="btn-primary flex items-center gap-2 text-sm"
-                                >
+                                <button onClick={onNext} data-testid="next-btn" className="btn-primary flex items-center gap-2 text-sm">
                                     Siguiente <ChevronRight className="w-4 h-4" />
                                 </button>
                             )
                         ) : (
-                            <button
-                                onClick={onNext}
-                                disabled={!revealed}
-                                data-testid="next-btn"
-                                className="btn-primary flex items-center gap-2 text-sm"
-                            >
+                            <button onClick={onNext} disabled={!canGoNext} data-testid="next-btn" className="btn-primary flex items-center gap-2 text-sm">
                                 {idx + 1 === quiz.questions.length ? "Ver resultado" : "Siguiente"}
                                 <ChevronRight className="w-4 h-4" />
                             </button>
@@ -370,6 +544,11 @@ export default function QuizRun() {
                     </div>
                 </div>
             </main>
+
+            {/* Modal edición */}
+            {editOpen && !isDevQ && (
+                <EditModal question={q} onClose={() => setEditOpen(false)} onSaved={onQuestionEdited} />
+            )}
         </div>
     );
 }

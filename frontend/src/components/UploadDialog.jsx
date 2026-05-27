@@ -124,6 +124,7 @@ export default function UploadDialog({ open, onClose, onCreated, subjectId }) {
                             {[
                                 { id: "mcq", label: "Opción múltiple" },
                                 { id: "tf", label: "Verdadero/Falso" },
+                                { id: "dev", label: "Desarrollo" },
                             ].map((t) => (
                                 <button
                                     key={t.id}

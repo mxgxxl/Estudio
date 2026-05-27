@@ -55,3 +55,21 @@ export const quizSubmit = (payload) => api.post("/quiz/submit", payload).then((r
 export const getStats = () => api.get("/stats").then((r) => r.data);
 export const getStatsBySubject = () => api.get("/stats/by-subject").then((r) => r.data);
 export const getStatsByTopic = () => api.get("/stats/by-topic").then((r) => r.data);
+
+// Questions edit
+export const editQuestion = (qid, data) => api.patch(`/questions/${qid}`, data).then((r) => r.data);
+
+// Topic text (for study mode)
+export const getTopicText = (topicId) => api.get(`/topics/${topicId}/text`).then((r) => r.data);
+
+// Dev question eval
+export const evalDevAnswer = (payload) => api.post("/quiz/eval-dev", payload).then((r) => r.data);
+
+// Flashcards
+export const getTopicFlashcards = (topicId) => api.get(`/topics/${topicId}/flashcards`).then((r) => r.data);
+export const generateTopicFlashcards = (topicId, numCards = 15) =>
+    api.post(`/topics/${topicId}/flashcards/generate?num_cards=${numCards}`, {}, { timeout: 120000 }).then((r) => r.data);
+export const reviewFlashcard = (cardId, correct) =>
+    api.post(`/flashcards/${cardId}/review?correct=${correct}`).then((r) => r.data);
+export const toggleFlashcardFavorite = (cardId) => api.post(`/flashcards/${cardId}/favorite`).then((r) => r.data);
+export const deleteFlashcard = (cardId) => api.delete(`/flashcards/${cardId}`).then((r) => r.data);

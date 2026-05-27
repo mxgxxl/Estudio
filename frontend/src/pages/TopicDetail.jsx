@@ -9,6 +9,7 @@ import {
     Check,
     Sparkles,
     FileText,
+    Layers,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -59,6 +60,7 @@ export default function TopicDetail() {
         if (filter === "errors") return q.times_answered > q.times_correct;
         if (filter === "mcq") return q.question_type === "mcq";
         if (filter === "tf") return q.question_type === "tf";
+        if (filter === "dev") return q.question_type === "dev";
         return true;
     });
 
@@ -115,6 +117,14 @@ export default function TopicDetail() {
                     </p>
                 </div>
                 <div className="flex gap-2">
+                    <Link
+                        to={`/temas/${topic.id}/flashcards`}
+                        data-testid="flashcards-btn"
+                        className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
+                        style={{ borderColor: "var(--border)" }}
+                    >
+                        <Layers className="w-4 h-4" /> Flashcards
+                    </Link>
                     <Link
                         to={`/quiz/setup?topic=${topic.id}&mode=practice`}
                         data-testid="practice-here-btn"
@@ -217,6 +227,7 @@ export default function TopicDetail() {
                     { id: "all", label: "Todas" },
                     { id: "mcq", label: "Opción múltiple" },
                     { id: "tf", label: "V/F" },
+                    { id: "dev", label: "Desarrollo" },
                     { id: "favorites", label: "Favoritas" },
                     { id: "difficult", label: "Difíciles" },
                     { id: "errors", label: "Falladas" },
