@@ -1,5 +1,6 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, BarChart3, BookOpen } from "lucide-react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { LayoutDashboard, BarChart3, BookOpen, LogOut } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
 
 const navItems = [
     { to: "/", label: "Inicio", icon: LayoutDashboard, exact: true, testid: "nav-home" },
@@ -9,7 +10,14 @@ const navItems = [
 
 export default function Layout() {
     const location = useLocation();
+    const navigate = useNavigate();
+    const { logout } = useAuth();
     const isQuizRun = location.pathname.startsWith("/quiz/run");
+
+    const handleLogout = () => {
+        logout();
+        navigate("/login");
+    };
 
     return (
         <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
@@ -55,6 +63,15 @@ export default function Layout() {
                                     </NavLink>
                                 );
                             })}
+                            <button
+                                type="button"
+                                onClick={handleLogout}
+                                data-testid="nav-logout"
+                                className="flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-secondary)]"
+                            >
+                                <LogOut className="w-4 h-4" />
+                                <span className="hidden sm:inline">Salir</span>
+                            </button>
                         </nav>
                     </div>
                 </header>

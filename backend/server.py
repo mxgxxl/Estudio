@@ -13,12 +13,15 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
+from passlib.context import CryptContext
+import jwt
 from pypdf import PdfReader
 
 from google import genai
@@ -38,6 +41,15 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 gemini_client: Optional[genai.Client] = (
     genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 )
+
+# Auth / JWT
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+JWT_ALGORITHM = "HS256"
+# Caducidad del token de acceso (por defecto 7 días)
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+bearer_scheme = HTTPBearer(auto_error=False)
 
 app = FastAPI(title="Study App API")
 api = APIRouter(prefix="/api")
@@ -1542,6 +1554,105 @@ async def delete_flashcard(card_id: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Auth — modelos, helpers, dependencia y endpoints
+# ---------------------------------------------------------------------------
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    email: str
+    plan: str = "free"
+    created_at: str = Field(default_factory=_now_iso)
+
+
+class UserInDB(User):
+    password_hash: str
+
+
+class RegisterReq(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginReq(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResp(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+def _hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:
+        return False
+
+
+def _create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": user_id, "exp": expire}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+async def get_current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> dict:
+    """Lee el Bearer token de la cabecera Authorization, lo valida y devuelve el usuario.
+    Responde 401 si falta o es inválido."""
+    cred_exc = HTTPException(
+        status_code=401,
+        detail="No autenticado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if creds is None or not creds.credentials:
+        raise cred_exc
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT_SECRET no configurada en el servidor")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise cred_exc
+    user_id = payload.get("sub")
+    if not user_id:
+        raise cred_exc
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if user is None:
+        raise cred_exc
+    return user
+
+
+@api.post("/auth/register", response_model=User, status_code=201)
+async def register(req: RegisterReq):
+    email = req.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=409, detail="El email ya está registrado")
+    user = UserInDB(email=email, password_hash=_hash_password(req.password))
+    await db.users.insert_one(user.model_dump())
+    return user
+
+
+@api.post("/auth/login", response_model=TokenResp)
+async def login(req: LoginReq):
+    email = req.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if user is None or not _verify_password(req.password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    token = _create_access_token(user["id"])
+    return TokenResp(access_token=token)
+
+
+@api.get("/auth/me", response_model=User)
+async def me(current_user: dict = Depends(get_current_user)):
+    return current_user
+
+
 # Register
 app.include_router(api)
 
@@ -1577,6 +1688,8 @@ else:
 @app.on_event("startup")
 async def ensure_indices():
     try:
+        await db.users.create_index("id", unique=True)
+        await db.users.create_index("email", unique=True)
         await db.subjects.create_index("id", unique=True)
         await db.topics.create_index("id", unique=True)
         await db.topics.create_index("subject_id")

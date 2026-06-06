@@ -5,6 +5,41 @@ export const API = `${BACKEND_URL}/api`;
 
 export const api = axios.create({ baseURL: API });
 
+// --- Auth token storage ---
+const TOKEN_KEY = "studia_token";
+export const getToken = () => localStorage.getItem(TOKEN_KEY);
+export const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+
+// Adjunta "Authorization: Bearer <token>" a TODAS las peticiones automáticamente.
+api.interceptors.request.use((config) => {
+    const token = getToken();
+    if (token) config.headers.Authorization = `Bearer ${token}`;
+    return config;
+});
+
+// Si el backend responde 401, la sesión ha caducado o es inválida: limpiamos el
+// token y mandamos a /login (salvo que ya estemos allí, para evitar bucles).
+api.interceptors.response.use(
+    (r) => r,
+    (error) => {
+        if (error?.response?.status === 401) {
+            clearToken();
+            if (!window.location.pathname.startsWith("/login")) {
+                window.location.assign("/login");
+            }
+        }
+        return Promise.reject(error);
+    }
+);
+
+// --- Auth API ---
+export const register = (email, password) =>
+    api.post("/auth/register", { email, password }).then((r) => r.data);
+export const login = (email, password) =>
+    api.post("/auth/login", { email, password }).then((r) => r.data);
+export const getMe = () => api.get("/auth/me").then((r) => r.data);
+
 // Subjects
 export const listSubjects = () => api.get("/subjects").then((r) => r.data);
 export const createSubject = (data) => api.post("/subjects", data).then((r) => r.data);

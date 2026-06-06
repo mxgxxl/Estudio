@@ -11,24 +11,36 @@ import TopicDetail from "@/pages/TopicDetail";
 import Stats from "@/pages/Stats";
 import FlashcardMode from "@/pages/FlashcardMode";
 import SurvivalMode from "@/pages/SurvivalMode";
+import Login from "@/pages/Login";
+import Register from "@/pages/Register";
+import ProtectedRoute from "@/components/ProtectedRoute";
+import { AuthProvider } from "@/context/AuthContext";
 
 function App() {
     return (
         <div className="App">
             <BrowserRouter>
-                <Routes>
-                    <Route element={<Layout />}>
-                        <Route path="/" element={<Dashboard />} />
-                        <Route path="/asignaturas/:id" element={<SubjectDetail />} />
-                        <Route path="/quiz/setup" element={<QuizSetup />} />
-                        <Route path="/quiz/run" element={<QuizRun />} />
-                        <Route path="/quiz/results" element={<QuizResults />} />
-                        <Route path="/temas/:id" element={<TopicDetail />} />
-                        <Route path="/stats" element={<Stats />} />
-                        <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
-                        <Route path="/supervivencia" element={<SurvivalMode />} />
-                    </Route>
-                </Routes>
+                <AuthProvider>
+                    <Routes>
+                        {/* Rutas públicas */}
+                        <Route path="/login" element={<Login />} />
+                        <Route path="/register" element={<Register />} />
+                        {/* Rutas protegidas: requieren sesión */}
+                        <Route element={<ProtectedRoute />}>
+                            <Route element={<Layout />}>
+                                <Route path="/" element={<Dashboard />} />
+                                <Route path="/asignaturas/:id" element={<SubjectDetail />} />
+                                <Route path="/quiz/setup" element={<QuizSetup />} />
+                                <Route path="/quiz/run" element={<QuizRun />} />
+                                <Route path="/quiz/results" element={<QuizResults />} />
+                                <Route path="/temas/:id" element={<TopicDetail />} />
+                                <Route path="/stats" element={<Stats />} />
+                                <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
+                                <Route path="/supervivencia" element={<SurvivalMode />} />
+                            </Route>
+                        </Route>
+                    </Routes>
+                </AuthProvider>
             </BrowserRouter>
             <Toaster
                 position="top-right"
