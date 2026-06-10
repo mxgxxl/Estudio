@@ -68,6 +68,7 @@ SUBJECT_COLORS = ["#C65D47", "#7A8B76", "#6C8A9C", "#D4A373", "#9C7A8B", "#5C8A7
 
 class Subject(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     name: str
     color: str = "#C65D47"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -75,6 +76,7 @@ class Subject(BaseModel):
 
 class Topic(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     subject_id: str
     name: str
     description: Optional[str] = ""
@@ -83,6 +85,7 @@ class Topic(BaseModel):
 
 class PdfSource(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     topic_id: str
     filename: str
     text: str
@@ -92,6 +95,7 @@ class PdfSource(BaseModel):
 
 class Question(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     topic_id: str
     topic_name: str
     subject_id: Optional[str] = None
@@ -118,6 +122,7 @@ class Question(BaseModel):
 
 class Attempt(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     mode: Literal["exam", "practice", "errors", "srs", "favorites"]
     subject_ids: List[str] = []
     topic_ids: List[str] = []
@@ -519,6 +524,37 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Auth dependency (definida pronto porque TODOS los endpoints de datos la usan
+# como Depends en sus argumentos; debe existir antes de declararlos).
+# ---------------------------------------------------------------------------
+async def get_current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> dict:
+    """Lee el Bearer token de la cabecera Authorization, lo valida y devuelve el usuario.
+    Responde 401 si falta o es inválido."""
+    cred_exc = HTTPException(
+        status_code=401,
+        detail="No autenticado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if creds is None or not creds.credentials:
+        raise cred_exc
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT_SECRET no configurada en el servidor")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise cred_exc
+    user_id = payload.get("sub")
+    if not user_id:
+        raise cred_exc
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if user is None:
+        raise cred_exc
+    return user
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @api.get("/")
@@ -555,42 +591,16 @@ async def diag_llm_test():
         }
 
 
-async def _ensure_default_subject_and_migrate() -> str:
-    orphan = await db.topics.find_one({"subject_id": {"$in": [None, ""]}}, {"_id": 0})
-    if orphan is None:
-        orphan = await db.topics.find_one({"subject_id": {"$exists": False}}, {"_id": 0})
-    if orphan is None:
-        return ""
-
-    default = await db.subjects.find_one({"name": "Anatomía"}, {"_id": 0})
-    if not default:
-        s = Subject(name="Anatomía", color="#C65D47")
-        await db.subjects.insert_one(s.model_dump())
-        default_id = s.id
-    else:
-        default_id = default["id"]
-
-    await db.topics.update_many(
-        {"$or": [{"subject_id": {"$exists": False}}, {"subject_id": {"$in": [None, ""]}}]},
-        {"$set": {"subject_id": default_id}},
-    )
-    await db.questions.update_many(
-        {"$or": [{"subject_id": {"$exists": False}}, {"subject_id": {"$in": [None, ""]}}]},
-        {"$set": {"subject_id": default_id, "question_type": "mcq", "num_options": 3}},
-    )
-    return default_id
-
-
 # ---- Subjects ----
 @api.get("/subjects")
-async def list_subjects():
-    await _ensure_default_subject_and_migrate()
-    subjects = await db.subjects.find({}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+async def list_subjects(current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    subjects = await db.subjects.find({"user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(1000)
     for s in subjects:
-        s["topic_count"] = await db.topics.count_documents({"subject_id": s["id"]})
-        s["question_count"] = await db.questions.count_documents({"subject_id": s["id"]})
+        s["topic_count"] = await db.topics.count_documents({"user_id": uid, "subject_id": s["id"]})
+        s["question_count"] = await db.questions.count_documents({"user_id": uid, "subject_id": s["id"]})
         agg = await db.questions.aggregate([
-            {"$match": {"subject_id": s["id"]}},
+            {"$match": {"user_id": uid, "subject_id": s["id"]}},
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
         ]).to_list(1)
         s["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
@@ -603,23 +613,24 @@ class SubjectCreate(BaseModel):
 
 
 @api.post("/subjects")
-async def create_subject(req: SubjectCreate):
+async def create_subject(req: SubjectCreate, current_user: dict = Depends(get_current_user)):
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Nombre vacío")
     color = req.color or random.choice(SUBJECT_COLORS)
-    s = Subject(name=name, color=color)
+    s = Subject(user_id=current_user["id"], name=name, color=color)
     await db.subjects.insert_one(s.model_dump())
     return s.model_dump()
 
 
 @api.get("/subjects/{subject_id}")
-async def get_subject(subject_id: str):
-    s = await db.subjects.find_one({"id": subject_id}, {"_id": 0})
+async def get_subject(subject_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    s = await db.subjects.find_one({"id": subject_id, "user_id": uid}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
-    s["topic_count"] = await db.topics.count_documents({"subject_id": subject_id})
-    s["question_count"] = await db.questions.count_documents({"subject_id": subject_id})
+    s["topic_count"] = await db.topics.count_documents({"user_id": uid, "subject_id": subject_id})
+    s["question_count"] = await db.questions.count_documents({"user_id": uid, "subject_id": subject_id})
     return s
 
 
@@ -629,57 +640,59 @@ class SubjectUpdate(BaseModel):
 
 
 @api.patch("/subjects/{subject_id}")
-async def update_subject(subject_id: str, req: SubjectUpdate):
+async def update_subject(subject_id: str, req: SubjectUpdate, current_user: dict = Depends(get_current_user)):
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
-    res = await db.subjects.update_one({"id": subject_id}, {"$set": fields})
+    res = await db.subjects.update_one({"id": subject_id, "user_id": current_user["id"]}, {"$set": fields})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     return {"ok": True}
 
 
 @api.delete("/subjects/{subject_id}")
-async def delete_subject(subject_id: str):
-    topic_ids = [t["id"] async for t in db.topics.find({"subject_id": subject_id}, {"_id": 0, "id": 1})]
-    res = await db.subjects.delete_one({"id": subject_id})
-    await db.topics.delete_many({"subject_id": subject_id})
-    await db.questions.delete_many({"subject_id": subject_id})
+async def delete_subject(subject_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topic_ids = [t["id"] async for t in db.topics.find({"subject_id": subject_id, "user_id": uid}, {"_id": 0, "id": 1})]
+    res = await db.subjects.delete_one({"id": subject_id, "user_id": uid})
+    await db.topics.delete_many({"subject_id": subject_id, "user_id": uid})
+    await db.questions.delete_many({"subject_id": subject_id, "user_id": uid})
     if topic_ids:
-        await db.pdfs.delete_many({"topic_id": {"$in": topic_ids}})
+        await db.pdfs.delete_many({"topic_id": {"$in": topic_ids}, "user_id": uid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     return {"ok": True}
 
 
 @api.get("/subjects/{subject_id}/topics")
-async def list_topics_for_subject(subject_id: str):
-    s = await db.subjects.find_one({"id": subject_id}, {"_id": 0})
+async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    s = await db.subjects.find_one({"id": subject_id, "user_id": uid}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
-    topics = await db.topics.find({"subject_id": subject_id}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    topics = await db.topics.find({"subject_id": subject_id, "user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(1000)
     for t in topics:
-        t["question_count"] = await db.questions.count_documents({"topic_id": t["id"]})
-        t["answered_count"] = await db.questions.count_documents({"topic_id": t["id"], "times_answered": {"$gt": 0}})
+        t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"]})
+        t["answered_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 0}})
         agg = await db.questions.aggregate([
-            {"$match": {"topic_id": t["id"]}},
+            {"$match": {"user_id": uid, "topic_id": t["id"]}},
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
         ]).to_list(1)
         t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
-        t["pdf_count"] = await db.pdfs.count_documents({"topic_id": t["id"]})
+        t["pdf_count"] = await db.pdfs.count_documents({"user_id": uid, "topic_id": t["id"]})
     return topics
 
 
 # ---- Topics ----
 @api.get("/topics")
-async def list_topics():
-    await _ensure_default_subject_and_migrate()
-    topics = await db.topics.find({}, {"_id": 0}).sort("created_at", 1).to_list(2000)
+async def list_topics(current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topics = await db.topics.find({"user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(2000)
     for t in topics:
-        t["question_count"] = await db.questions.count_documents({"topic_id": t["id"]})
-        t["answered_count"] = await db.questions.count_documents({"topic_id": t["id"], "times_answered": {"$gt": 0}})
+        t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"]})
+        t["answered_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 0}})
         agg = await db.questions.aggregate([
-            {"$match": {"topic_id": t["id"]}},
+            {"$match": {"user_id": uid, "topic_id": t["id"]}},
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
         ]).to_list(1)
         t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
@@ -687,27 +700,32 @@ async def list_topics():
 
 
 @api.get("/topics/{topic_id}")
-async def get_topic(topic_id: str):
-    t = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+async def get_topic(topic_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    t = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not t:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
-    t["question_count"] = await db.questions.count_documents({"topic_id": topic_id})
-    t["pdf_count"] = await db.pdfs.count_documents({"topic_id": topic_id})
+    t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": topic_id})
+    t["pdf_count"] = await db.pdfs.count_documents({"user_id": uid, "topic_id": topic_id})
     agg = await db.questions.aggregate([
-        {"$match": {"topic_id": topic_id}},
+        {"$match": {"user_id": uid, "topic_id": topic_id}},
         {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
     ]).to_list(1)
     t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
     if t.get("subject_id"):
-        s = await db.subjects.find_one({"id": t["subject_id"]}, {"_id": 0})
+        s = await db.subjects.find_one({"id": t["subject_id"], "user_id": uid}, {"_id": 0})
         t["subject"] = s
     return t
 
 
 @api.get("/topics/{topic_id}/text")
-async def get_topic_text(topic_id: str):
+async def get_topic_text(topic_id: str, current_user: dict = Depends(get_current_user)):
     """Return combined PDF text for a topic (used in study mode with temario visible)."""
-    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
     parts = []
@@ -725,8 +743,10 @@ async def upload_topic_pdf(
     num_options: int = Form(3),
     custom_instructions: str = Form(""),
     file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
 ):
-    subj = await db.subjects.find_one({"id": subject_id}, {"_id": 0})
+    uid = current_user["id"]
+    subj = await db.subjects.find_one({"id": subject_id, "user_id": uid}, {"_id": 0})
     if not subj:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     if not file.filename.lower().endswith(".pdf"):
@@ -746,6 +766,7 @@ async def upload_topic_pdf(
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
 
     topic = Topic(
+        user_id=uid,
         subject_id=subject_id,
         name=name.strip(),
         description=f"Generado desde {file.filename}",
@@ -753,6 +774,7 @@ async def upload_topic_pdf(
     await db.topics.insert_one(topic.model_dump())
 
     pdf_source = PdfSource(
+        user_id=uid,
         topic_id=topic.id,
         filename=file.filename,
         text=text,
@@ -778,6 +800,7 @@ async def upload_topic_pdf(
     docs = []
     for g in generated:
         q = Question(
+            user_id=uid,
             topic_id=topic.id,
             topic_name=topic.name,
             subject_id=subject_id,
@@ -802,27 +825,36 @@ async def upload_topic_pdf(
 
 
 @api.delete("/topics/{topic_id}")
-async def delete_topic(topic_id: str):
-    res = await db.topics.delete_one({"id": topic_id})
-    await db.questions.delete_many({"topic_id": topic_id})
-    await db.pdfs.delete_many({"topic_id": topic_id})
+async def delete_topic(topic_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    res = await db.topics.delete_one({"id": topic_id, "user_id": uid})
+    await db.questions.delete_many({"topic_id": topic_id, "user_id": uid})
+    await db.pdfs.delete_many({"topic_id": topic_id, "user_id": uid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     return {"ok": True}
 
 
 @api.get("/topics/{topic_id}/questions")
-async def topic_questions(topic_id: str):
-    qs = await db.questions.find({"topic_id": topic_id}, {"_id": 0}).sort("created_at", 1).to_list(5000)
+async def topic_questions(topic_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    qs = await db.questions.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(5000)
     return qs
 
 
 # ---- PDF sources ----
 @api.get("/topics/{topic_id}/pdfs")
-async def list_topic_pdfs(topic_id: str):
-    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0, "text": 0}).sort("created_at", 1).to_list(100)
+async def list_topic_pdfs(topic_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0, "text": 0}).sort("created_at", 1).to_list(100)
     for p in pdfs:
-        p["question_count"] = await db.questions.count_documents({"pdf_source_id": p["id"]})
+        p["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": p["id"]})
     return pdfs
 
 
@@ -833,11 +865,12 @@ class RegenerateReq(BaseModel):
 
 
 @api.post("/pdfs/{pdf_id}/regenerate")
-async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq):
-    pdf = await db.pdfs.find_one({"id": pdf_id}, {"_id": 0})
+async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    pdf = await db.pdfs.find_one({"id": pdf_id, "user_id": uid}, {"_id": 0})
     if not pdf:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
-    topic = await db.topics.find_one({"id": pdf["topic_id"]}, {"_id": 0})
+    topic = await db.topics.find_one({"id": pdf["topic_id"], "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     if req.num_questions < 3 or req.num_questions > 80:
@@ -850,6 +883,7 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq):
     docs = []
     for g in generated:
         q = Question(
+            user_id=uid,
             topic_id=topic["id"],
             topic_name=topic["name"],
             subject_id=topic.get("subject_id"),
@@ -869,17 +903,19 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq):
 
 
 @api.delete("/pdfs/{pdf_id}")
-async def delete_pdf(pdf_id: str):
-    res = await db.pdfs.delete_one({"id": pdf_id})
+async def delete_pdf(pdf_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    res = await db.pdfs.delete_one({"id": pdf_id, "user_id": uid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
-    await db.questions.update_many({"pdf_source_id": pdf_id}, {"$set": {"pdf_source_id": None}})
+    await db.questions.update_many({"pdf_source_id": pdf_id, "user_id": uid}, {"$set": {"pdf_source_id": None}})
     return {"ok": True}
 
 
 @api.post("/topics/{topic_id}/pdfs/upload")
-async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
-    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     if not file.filename.lower().endswith(".pdf"):
@@ -892,6 +928,7 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...)):
     if len(text) < 200:
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
     pdf_source = PdfSource(
+        user_id=uid,
         topic_id=topic_id,
         filename=file.filename,
         text=text,
@@ -917,8 +954,9 @@ class GenerateFromPdfsReq(BaseModel):
 
 
 @api.post("/topics/{topic_id}/generate")
-async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
-    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     if not req.pdf_ids:
@@ -927,7 +965,7 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
         raise HTTPException(status_code=400, detail="num_questions debe estar entre 3 y 80")
 
     pdfs = await db.pdfs.find(
-        {"id": {"$in": req.pdf_ids}, "topic_id": topic_id}, {"_id": 0}
+        {"id": {"$in": req.pdf_ids}, "topic_id": topic_id, "user_id": uid}, {"_id": 0}
     ).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No se encontraron PDFs")
@@ -948,6 +986,7 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
     docs = []
     for g in generated:
         q = Question(
+            user_id=uid,
             topic_id=topic_id,
             topic_name=topic["name"],
             subject_id=topic.get("subject_id"),
@@ -968,22 +1007,24 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq):
 
 # ---- Questions ----
 @api.post("/questions/{question_id}/favorite")
-async def toggle_favorite(question_id: str):
-    q = await db.questions.find_one({"id": question_id}, {"_id": 0})
+async def toggle_favorite(question_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    q = await db.questions.find_one({"id": question_id, "user_id": uid}, {"_id": 0})
     if not q:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     new_val = not q.get("favorite", False)
-    await db.questions.update_one({"id": question_id}, {"$set": {"favorite": new_val}})
+    await db.questions.update_one({"id": question_id, "user_id": uid}, {"$set": {"favorite": new_val}})
     return {"favorite": new_val}
 
 
 @api.post("/questions/{question_id}/difficult")
-async def toggle_difficult(question_id: str):
-    q = await db.questions.find_one({"id": question_id}, {"_id": 0})
+async def toggle_difficult(question_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    q = await db.questions.find_one({"id": question_id, "user_id": uid}, {"_id": 0})
     if not q:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     new_val = not q.get("difficult", False)
-    await db.questions.update_one({"id": question_id}, {"$set": {"difficult": new_val}})
+    await db.questions.update_one({"id": question_id, "user_id": uid}, {"$set": {"difficult": new_val}})
     return {"difficult": new_val}
 
 
@@ -996,20 +1037,20 @@ class EditQuestionReq(BaseModel):
 
 
 @api.patch("/questions/{question_id}")
-async def edit_question(question_id: str, req: EditQuestionReq):
+async def edit_question(question_id: str, req: EditQuestionReq, current_user: dict = Depends(get_current_user)):
     """Edit a question manually."""
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
-    res = await db.questions.update_one({"id": question_id}, {"$set": fields})
+    res = await db.questions.update_one({"id": question_id, "user_id": current_user["id"]}, {"$set": fields})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     return {"ok": True}
 
 
 @api.delete("/questions/{question_id}")
-async def delete_question(question_id: str):
-    res = await db.questions.delete_one({"id": question_id})
+async def delete_question(question_id: str, current_user: dict = Depends(get_current_user)):
+    res = await db.questions.delete_one({"id": question_id, "user_id": current_user["id"]})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     return {"ok": True}
@@ -1022,9 +1063,9 @@ class EvalDevReq(BaseModel):
 
 
 @api.post("/quiz/eval-dev")
-async def eval_dev_answer(req: EvalDevReq):
+async def eval_dev_answer(req: EvalDevReq, current_user: dict = Depends(get_current_user)):
     """Evaluate a development answer using AI."""
-    q = await db.questions.find_one({"id": req.question_id}, {"_id": 0})
+    q = await db.questions.find_one({"id": req.question_id, "user_id": current_user["id"]}, {"_id": 0})
     if not q:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
     if q.get("question_type") != "dev":
@@ -1051,8 +1092,8 @@ class QuizStartReq(BaseModel):
 
 
 @api.post("/quiz/start")
-async def quiz_start(req: QuizStartReq):
-    query: dict = {}
+async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
+    query: dict = {"user_id": current_user["id"]}
     if req.subject_ids:
         query["subject_id"] = {"$in": req.subject_ids}
     if req.topic_ids:
@@ -1167,7 +1208,8 @@ def _update_srs(q: dict, correct: bool) -> dict:
 
 
 @api.post("/quiz/submit")
-async def quiz_submit(req: QuizSubmitReq):
+async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
     correct = 0
     wrong = 0
     unanswered = 0
@@ -1194,7 +1236,7 @@ async def quiz_submit(req: QuizSubmitReq):
         else:
             wrong += 1
 
-        q = await db.questions.find_one({"id": qid}, {"_id": 0})
+        q = await db.questions.find_one({"id": qid, "user_id": uid}, {"_id": 0})
         if not q:
             continue
         update = {
@@ -1205,7 +1247,7 @@ async def quiz_submit(req: QuizSubmitReq):
                 **_update_srs(q, is_correct),
             },
         }
-        await db.questions.update_one({"id": qid}, update)
+        await db.questions.update_one({"id": qid, "user_id": uid}, update)
 
     pf = req.penalty_factor
     if pf and pf > 0:
@@ -1219,6 +1261,7 @@ async def quiz_submit(req: QuizSubmitReq):
 
     today = datetime.now(timezone.utc).date().isoformat()
     attempt = Attempt(
+        user_id=uid,
         mode=req.mode,
         subject_ids=req.subject_ids,
         topic_ids=req.topic_ids,
@@ -1251,14 +1294,15 @@ async def quiz_submit(req: QuizSubmitReq):
 
 # ---- Stats ----
 @api.get("/stats")
-async def stats_overview():
-    await _ensure_default_subject_and_migrate()
-    total_subjects = await db.subjects.count_documents({})
-    total_topics = await db.topics.count_documents({})
-    total_questions = await db.questions.count_documents({})
-    total_attempts = await db.attempts.count_documents({})
+async def stats_overview(current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    total_subjects = await db.subjects.count_documents({"user_id": uid})
+    total_topics = await db.topics.count_documents({"user_id": uid})
+    total_questions = await db.questions.count_documents({"user_id": uid})
+    total_attempts = await db.attempts.count_documents({"user_id": uid})
 
     agg = await db.questions.aggregate([
+        {"$match": {"user_id": uid}},
         {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
     ]).to_list(1)
     accuracy = 0.0
@@ -1267,11 +1311,11 @@ async def stats_overview():
         accuracy = round(100 * agg[0]["ok"] / agg[0]["ans"], 1)
         answered = agg[0]["ans"]
 
-    favorites = await db.questions.count_documents({"favorite": True})
-    difficult = await db.questions.count_documents({"difficult": True})
-    errors_pool = await db.questions.count_documents({"$expr": {"$gt": ["$times_answered", "$times_correct"]}})
+    favorites = await db.questions.count_documents({"user_id": uid, "favorite": True})
+    difficult = await db.questions.count_documents({"user_id": uid, "difficult": True})
+    errors_pool = await db.questions.count_documents({"user_id": uid, "$expr": {"$gt": ["$times_answered", "$times_correct"]}})
     now = _now_iso()
-    due_srs = await db.questions.count_documents({"srs_next_review": {"$lte": now}, "times_answered": {"$gt": 0}})
+    due_srs = await db.questions.count_documents({"user_id": uid, "srs_next_review": {"$lte": now}, "times_answered": {"$gt": 0}})
 
     # Streak calculation
     today = datetime.now(timezone.utc).date()
@@ -1279,14 +1323,14 @@ async def stats_overview():
     check_date = today
     for _ in range(365):
         day_str = check_date.isoformat()
-        count = await db.attempts.count_documents({"streak_day": day_str})
+        count = await db.attempts.count_documents({"user_id": uid, "streak_day": day_str})
         if count > 0:
             streak += 1
             check_date = check_date - timedelta(days=1)
         else:
             break
 
-    last_attempts = await db.attempts.find({}, {"_id": 0}).sort("created_at", -1).to_list(3)
+    last_attempts = await db.attempts.find({"user_id": uid}, {"_id": 0}).sort("created_at", -1).to_list(3)
 
     return {
         "total_subjects": total_subjects,
@@ -1305,12 +1349,13 @@ async def stats_overview():
 
 
 @api.get("/stats/by-subject")
-async def stats_by_subject():
-    subjects = await db.subjects.find({}, {"_id": 0}).to_list(1000)
+async def stats_by_subject(current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    subjects = await db.subjects.find({"user_id": uid}, {"_id": 0}).to_list(1000)
     out = []
     for s in subjects:
         agg = await db.questions.aggregate([
-            {"$match": {"subject_id": s["id"]}},
+            {"$match": {"user_id": uid, "subject_id": s["id"]}},
             {"$group": {
                 "_id": None,
                 "ans": {"$sum": "$times_answered"},
@@ -1344,12 +1389,13 @@ async def stats_by_subject():
 
 
 @api.get("/stats/by-topic")
-async def stats_by_topic():
-    topics = await db.topics.find({}, {"_id": 0}).to_list(2000)
+async def stats_by_topic(current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    topics = await db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000)
     out = []
     for t in topics:
         agg = await db.questions.aggregate([
-            {"$match": {"topic_id": t["id"]}},
+            {"$match": {"user_id": uid, "topic_id": t["id"]}},
             {"$group": {
                 "_id": None,
                 "ans": {"$sum": "$times_answered"},
@@ -1388,6 +1434,7 @@ async def stats_by_topic():
 # ---------------------------------------------------------------------------
 class Flashcard(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     topic_id: str
     topic_name: str
     subject_id: Optional[str] = None
@@ -1472,20 +1519,25 @@ TEMARIO:
 
 
 @api.get("/topics/{topic_id}/flashcards")
-async def get_topic_flashcards(topic_id: str):
+async def get_topic_flashcards(topic_id: str, current_user: dict = Depends(get_current_user)):
     """Return existing flashcards for a topic."""
-    cards = await db.flashcards.find({"topic_id": topic_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    cards = await db.flashcards.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(500)
     return cards
 
 
 @api.post("/topics/{topic_id}/flashcards/generate")
-async def generate_topic_flashcards(topic_id: str, num_cards: int = 15):
+async def generate_topic_flashcards(topic_id: str, num_cards: int = 15, current_user: dict = Depends(get_current_user)):
     """Generate flashcards from the topic's PDF text using AI."""
-    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 
@@ -1499,6 +1551,7 @@ async def generate_topic_flashcards(topic_id: str, num_cards: int = 15):
     docs = []
     for c in cards:
         fc = Flashcard(
+            user_id=uid,
             topic_id=topic_id,
             topic_name=topic["name"],
             subject_id=topic.get("subject_id"),
@@ -1509,25 +1562,26 @@ async def generate_topic_flashcards(topic_id: str, num_cards: int = 15):
         docs.append(fc.model_dump())
 
     # Replace existing flashcards for this topic
-    await db.flashcards.delete_many({"topic_id": topic_id})
+    await db.flashcards.delete_many({"topic_id": topic_id, "user_id": uid})
     if docs:
         await db.flashcards.insert_many(docs)
         # Re-fetch to avoid ObjectId serialization issues
-        docs = await db.flashcards.find({"topic_id": topic_id}, {"_id": 0}).to_list(500)
+        docs = await db.flashcards.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(500)
 
     return {"flashcards_created": len(docs), "flashcards": docs}
 
 
 @api.post("/flashcards/{card_id}/review")
-async def review_flashcard(card_id: str, correct: bool):
+async def review_flashcard(card_id: str, correct: bool, current_user: dict = Depends(get_current_user)):
     """Mark a flashcard as correct or incorrect and update SRS."""
-    card = await db.flashcards.find_one({"id": card_id}, {"_id": 0})
+    uid = current_user["id"]
+    card = await db.flashcards.find_one({"id": card_id, "user_id": uid}, {"_id": 0})
     if not card:
         raise HTTPException(status_code=404, detail="Flashcard no encontrada")
 
     srs = _update_srs(card, correct)
     await db.flashcards.update_one(
-        {"id": card_id},
+        {"id": card_id, "user_id": uid},
         {
             "$inc": {"times_reviewed": 1, **(({"times_correct": 1}) if correct else {})},
             "$set": {"last_reviewed_at": _now_iso(), **srs},
@@ -1537,18 +1591,19 @@ async def review_flashcard(card_id: str, correct: bool):
 
 
 @api.post("/flashcards/{card_id}/favorite")
-async def toggle_flashcard_favorite(card_id: str):
-    card = await db.flashcards.find_one({"id": card_id}, {"_id": 0})
+async def toggle_flashcard_favorite(card_id: str, current_user: dict = Depends(get_current_user)):
+    uid = current_user["id"]
+    card = await db.flashcards.find_one({"id": card_id, "user_id": uid}, {"_id": 0})
     if not card:
         raise HTTPException(status_code=404, detail="Flashcard no encontrada")
     new_val = not card.get("favorite", False)
-    await db.flashcards.update_one({"id": card_id}, {"$set": {"favorite": new_val}})
+    await db.flashcards.update_one({"id": card_id, "user_id": uid}, {"$set": {"favorite": new_val}})
     return {"favorite": new_val}
 
 
 @api.delete("/flashcards/{card_id}")
-async def delete_flashcard(card_id: str):
-    res = await db.flashcards.delete_one({"id": card_id})
+async def delete_flashcard(card_id: str, current_user: dict = Depends(get_current_user)):
+    res = await db.flashcards.delete_one({"id": card_id, "user_id": current_user["id"]})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Flashcard no encontrada")
     return {"ok": True}
@@ -1598,33 +1653,6 @@ def _create_access_token(user_id: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {"sub": user_id, "exp": expire}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
-async def get_current_user(
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-) -> dict:
-    """Lee el Bearer token de la cabecera Authorization, lo valida y devuelve el usuario.
-    Responde 401 si falta o es inválido."""
-    cred_exc = HTTPException(
-        status_code=401,
-        detail="No autenticado",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    if creds is None or not creds.credentials:
-        raise cred_exc
-    if not JWT_SECRET:
-        raise HTTPException(status_code=500, detail="JWT_SECRET no configurada en el servidor")
-    try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError:
-        raise cred_exc
-    user_id = payload.get("sub")
-    if not user_id:
-        raise cred_exc
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
-    if user is None:
-        raise cred_exc
-    return user
 
 
 @api.post("/auth/register", response_model=User, status_code=201)
@@ -1687,11 +1715,20 @@ async def ensure_indices():
     try:
         await db.users.create_index("id", unique=True)
         await db.users.create_index("email", unique=True)
+        # Subjects
         await db.subjects.create_index("id", unique=True)
+        await db.subjects.create_index([("user_id", 1), ("id", 1)])
+        # Topics
         await db.topics.create_index("id", unique=True)
         await db.topics.create_index("subject_id")
+        await db.topics.create_index([("user_id", 1), ("id", 1)])
+        await db.topics.create_index([("user_id", 1), ("subject_id", 1)])
+        # PDFs
         await db.pdfs.create_index("id", unique=True)
         await db.pdfs.create_index("topic_id")
+        await db.pdfs.create_index([("user_id", 1), ("id", 1)])
+        await db.pdfs.create_index([("user_id", 1), ("topic_id", 1)])
+        # Questions
         await db.questions.create_index("id", unique=True)
         await db.questions.create_index("topic_id")
         await db.questions.create_index("subject_id")
@@ -1701,16 +1738,38 @@ async def ensure_indices():
         await db.questions.create_index("srs_next_review")
         await db.questions.create_index("question_type")
         await db.questions.create_index([("times_answered", 1), ("times_correct", 1)])
+        await db.questions.create_index([("user_id", 1), ("id", 1)])
+        await db.questions.create_index([("user_id", 1), ("subject_id", 1)])
+        await db.questions.create_index([("user_id", 1), ("topic_id", 1)])
+        await db.questions.create_index([("user_id", 1), ("pdf_source_id", 1)])
+        # Attempts
         await db.attempts.create_index("id", unique=True)
         await db.attempts.create_index([("created_at", -1)])
         await db.attempts.create_index("streak_day")
+        await db.attempts.create_index([("user_id", 1), ("id", 1)])
+        await db.attempts.create_index([("user_id", 1), ("created_at", -1)])
+        await db.attempts.create_index([("user_id", 1), ("streak_day", 1)])
+        # Flashcards
         await db.flashcards.create_index("id", unique=True)
         await db.flashcards.create_index("topic_id")
         await db.flashcards.create_index("subject_id")
         await db.flashcards.create_index("srs_next_review")
+        await db.flashcards.create_index([("user_id", 1), ("id", 1)])
+        await db.flashcards.create_index([("user_id", 1), ("topic_id", 1)])
+        await db.flashcards.create_index([("user_id", 1), ("subject_id", 1)])
+        # Survival records — la unicidad ahora es por (user_id, scope_type, scope_id)
         await db.survival_records.create_index("id", unique=True)
-        await db.survival_records.create_index([("scope_type", 1), ("scope_id", 1)], unique=True)
         await db.survival_records.create_index("score")
+        await db.survival_records.create_index([("user_id", 1), ("id", 1)])
+        await db.survival_records.create_index(
+            [("user_id", 1), ("scope_type", 1), ("scope_id", 1)], unique=True
+        )
+        # Eliminar el antiguo índice único global (scope_type, scope_id) si existe:
+        # en multiusuario impediría que dos usuarios tuvieran récord del mismo scope.
+        try:
+            await db.survival_records.drop_index("scope_type_1_scope_id_1")
+        except Exception:
+            pass
         logger.info("MongoDB indices ensured.")
     except Exception as e:
         logger.warning("ensure_indices failed: %s", e)
@@ -1726,6 +1785,7 @@ async def shutdown_db_client():
 # ---------------------------------------------------------------------------
 class SurvivalRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     scope_type: Literal["topic", "subject"]  # topic or subject
     scope_id: str
     scope_name: str
@@ -1737,17 +1797,17 @@ class SurvivalRecord(BaseModel):
 
 
 @api.get("/survival/records")
-async def get_survival_records():
+async def get_survival_records(current_user: dict = Depends(get_current_user)):
     """Get all survival mode records."""
-    records = await db.survival_records.find({}, {"_id": 0}).sort("score", -1).to_list(500)
+    records = await db.survival_records.find({"user_id": current_user["id"]}, {"_id": 0}).sort("score", -1).to_list(500)
     return records
 
 
 @api.get("/survival/records/{scope_type}/{scope_id}")
-async def get_survival_record(scope_type: str, scope_id: str):
+async def get_survival_record(scope_type: str, scope_id: str, current_user: dict = Depends(get_current_user)):
     """Get best record for a topic or subject."""
     record = await db.survival_records.find_one(
-        {"scope_type": scope_type, "scope_id": scope_id},
+        {"scope_type": scope_type, "scope_id": scope_id, "user_id": current_user["id"]},
         {"_id": 0}
     )
     return record or {}
@@ -1764,16 +1824,18 @@ class SaveSurvivalRecordReq(BaseModel):
 
 
 @api.post("/survival/records")
-async def save_survival_record(req: SaveSurvivalRecordReq):
+async def save_survival_record(req: SaveSurvivalRecordReq, current_user: dict = Depends(get_current_user)):
     """Save survival record only if it beats the current best."""
+    uid = current_user["id"]
     existing = await db.survival_records.find_one(
-        {"scope_type": req.scope_type, "scope_id": req.scope_id},
+        {"scope_type": req.scope_type, "scope_id": req.scope_id, "user_id": uid},
         {"_id": 0}
     )
     if existing and existing["score"] >= req.score:
         return {"saved": False, "best_score": existing["score"], "new_record": False}
 
     record = SurvivalRecord(
+        user_id=uid,
         scope_type=req.scope_type,
         scope_id=req.scope_id,
         scope_name=req.scope_name,
@@ -1784,7 +1846,7 @@ async def save_survival_record(req: SaveSurvivalRecordReq):
     )
     if existing:
         await db.survival_records.replace_one(
-            {"scope_type": req.scope_type, "scope_id": req.scope_id},
+            {"scope_type": req.scope_type, "scope_id": req.scope_id, "user_id": uid},
             record.model_dump()
         )
     else:
@@ -1797,13 +1859,14 @@ async def save_survival_record(req: SaveSurvivalRecordReq):
 # AI Topic Summary
 # ---------------------------------------------------------------------------
 @api.post("/topics/{topic_id}/summary")
-async def generate_topic_summary(topic_id: str):
+async def generate_topic_summary(topic_id: str, current_user: dict = Depends(get_current_user)):
     """Generate a structured summary of a topic using AI."""
-    topic = await db.topics.find_one({"id": topic_id}, {"_id": 0})
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdfs = await db.pdfs.find({"topic_id": topic_id}, {"_id": 0}).to_list(100)
+    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 
@@ -1860,13 +1923,14 @@ TEMARIO:
 # Gap Detector
 # ---------------------------------------------------------------------------
 @api.get("/stats/gaps")
-async def get_knowledge_gaps():
+async def get_knowledge_gaps(current_user: dict = Depends(get_current_user)):
     """Identify topics and questions with accuracy below 60%."""
-    topics = await db.topics.find({}, {"_id": 0}).to_list(2000)
+    uid = current_user["id"]
+    topics = await db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000)
     weak_topics = []
     for t in topics:
         agg = await db.questions.aggregate([
-            {"$match": {"topic_id": t["id"], "times_answered": {"$gt": 2}}},
+            {"$match": {"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 2}}},
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}, "total": {"$sum": 1}}},
         ]).to_list(1)
         if agg and agg[0]["ans"] > 0:
@@ -1883,7 +1947,7 @@ async def get_knowledge_gaps():
 
     # Also get weakest individual questions
     weak_questions = await db.questions.find(
-        {"times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
+        {"user_id": uid, "times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
         {"_id": 0, "id": 1, "question": 1, "topic_name": 1, "times_answered": 1, "times_correct": 1}
     ).sort([("times_answered", -1)]).to_list(20)
 
