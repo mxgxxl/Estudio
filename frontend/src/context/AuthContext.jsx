@@ -1,9 +1,10 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import {
     getToken,
     setToken,
     clearToken,
     getMe,
+    getUsage,
     login as apiLogin,
     register as apiRegister,
 } from "@/lib/api";
@@ -12,9 +13,21 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null);
+    const [usage, setUsage] = useState(null);
     const [loading, setLoading] = useState(true);
 
-    // Al arrancar la app, si hay token guardado, recuperamos el usuario.
+    // Refresca el contador de uso de IA del usuario.
+    const refreshUsage = useCallback(() => {
+        if (!getToken()) return Promise.resolve(null);
+        return getUsage()
+            .then((u) => {
+                setUsage(u);
+                return u;
+            })
+            .catch(() => null);
+    }, []);
+
+    // Al arrancar la app, si hay token guardado, recuperamos el usuario y el uso.
     useEffect(() => {
         const token = getToken();
         if (!token) {
@@ -22,19 +35,30 @@ export function AuthProvider({ children }) {
             return;
         }
         getMe()
-            .then(setUser)
+            .then((me) => {
+                setUser(me);
+                return refreshUsage();
+            })
             .catch(() => {
                 clearToken();
                 setUser(null);
             })
             .finally(() => setLoading(false));
-    }, []);
+    }, [refreshUsage]);
+
+    // Tras cualquier generación de IA correcta, refrescamos el contador.
+    useEffect(() => {
+        const onGenerated = () => refreshUsage();
+        window.addEventListener("studia:ai-generated", onGenerated);
+        return () => window.removeEventListener("studia:ai-generated", onGenerated);
+    }, [refreshUsage]);
 
     const login = async (email, password) => {
         const { access_token } = await apiLogin(email, password);
         setToken(access_token);
         const me = await getMe();
         setUser(me);
+        await refreshUsage();
         return me;
     };
 
@@ -46,11 +70,12 @@ export function AuthProvider({ children }) {
     const logout = () => {
         clearToken();
         setUser(null);
+        setUsage(null);
     };
 
     return (
         <AuthContext.Provider
-            value={{ user, loading, isAuthenticated: !!user, login, register, logout }}
+            value={{ user, usage, loading, isAuthenticated: !!user, login, register, logout, refreshUsage }}
         >
             {children}
         </AuthContext.Provider>

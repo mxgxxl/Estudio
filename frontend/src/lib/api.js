@@ -18,16 +18,37 @@ api.interceptors.request.use((config) => {
     return config;
 });
 
-// Si el backend responde 401, la sesión ha caducado o es inválida: limpiamos el
-// token y mandamos a /login (salvo que ya estemos allí, para evitar bucles).
+// Detecta las URLs de acciones que consumen cuota de IA (para refrescar el
+// contador tras una generación correcta).
+const AI_GEN_URL_RE = /(\/topics\/upload|\/regenerate|\/generate|\/summary|\/eval-dev)$/;
+
 api.interceptors.response.use(
-    (r) => r,
+    (r) => {
+        // Tras una generación de IA correcta, avisa para refrescar el contador.
+        const method = (r?.config?.method || "").toLowerCase();
+        const url = r?.config?.url || "";
+        if (method === "post" && AI_GEN_URL_RE.test(url)) {
+            window.dispatchEvent(new CustomEvent("studia:ai-generated"));
+        }
+        return r;
+    },
     (error) => {
-        if (error?.response?.status === 401) {
+        const status = error?.response?.status;
+        // 401: sesión caducada/ inválida -> limpiar token y mandar a /login.
+        if (status === 401) {
             clearToken();
             if (!window.location.pathname.startsWith("/login")) {
                 window.location.assign("/login");
             }
+        }
+        // 402: sin cuota de IA. NO cierra sesión (sigue autenticado). Avisamos a
+        // la UI para mostrar el aviso de "hazte Premium".
+        if (status === 402) {
+            window.dispatchEvent(
+                new CustomEvent("studia:quota-exceeded", {
+                    detail: error?.response?.data?.detail || "",
+                })
+            );
         }
         return Promise.reject(error);
     }
@@ -39,6 +60,9 @@ export const register = (email, password) =>
 export const login = (email, password) =>
     api.post("/auth/login", { email, password }).then((r) => r.data);
 export const getMe = () => api.get("/auth/me").then((r) => r.data);
+
+// Uso de IA (contador de generaciones del mes para el plan del usuario)
+export const getUsage = () => api.get("/usage/me").then((r) => r.data);
 
 // Subjects
 export const listSubjects = () => api.get("/subjects").then((r) => r.data);

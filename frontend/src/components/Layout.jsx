@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LayoutDashboard, BarChart3, BookOpen, LogOut } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UsageBadge from "@/components/UsageBadge";
+import PremiumDialog from "@/components/PremiumDialog";
 
 const navItems = [
     { to: "/", label: "Inicio", icon: LayoutDashboard, exact: true, testid: "nav-home" },
@@ -11,8 +14,20 @@ const navItems = [
 export default function Layout() {
     const location = useLocation();
     const navigate = useNavigate();
-    const { logout } = useAuth();
+    const { logout, refreshUsage } = useAuth();
     const isQuizRun = location.pathname.startsWith("/quiz/run");
+
+    // Modal "hazte Premium" cuando una acción de IA devuelve 402.
+    const [quotaDialog, setQuotaDialog] = useState({ open: false, detail: "" });
+    useEffect(() => {
+        const onQuota = (e) => {
+            setQuotaDialog({ open: true, detail: e?.detail || "" });
+            // El backend no consumió: aun así refrescamos para reflejar el estado.
+            refreshUsage();
+        };
+        window.addEventListener("studia:quota-exceeded", onQuota);
+        return () => window.removeEventListener("studia:quota-exceeded", onQuota);
+    }, [refreshUsage]);
 
     const handleLogout = () => {
         logout();
@@ -42,6 +57,7 @@ export default function Layout() {
                             </div>
                         </NavLink>
                         <nav className="flex items-center gap-1 md:gap-2">
+                            <UsageBadge />
                             {navItems.map((item) => {
                                 const Icon = item.icon;
                                 return (
@@ -87,6 +103,11 @@ export default function Layout() {
                     Studia · Estudia cualquier asignatura con preguntas generadas desde tus apuntes
                 </footer>
             )}
+            <PremiumDialog
+                open={quotaDialog.open}
+                detail={quotaDialog.detail}
+                onClose={() => setQuotaDialog({ open: false, detail: "" })}
+            />
         </div>
     );
 }
