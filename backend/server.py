@@ -1653,9 +1653,6 @@ async def me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
-# Register
-app.include_router(api)
-
 # --- CORS ---
 _BASELINE_ORIGINS = [
     "https://impartial-passion-production-9090.up.railway.app",
@@ -1895,3 +1892,11 @@ async def get_knowledge_gaps():
 
     weak_topics.sort(key=lambda x: x["accuracy"])
     return {"weak_topics": weak_topics[:10], "weak_questions": weak_questions}
+
+
+# ---------------------------------------------------------------------------
+# Register router — DEBE ir al final, tras definir TODOS los endpoints, porque
+# FastAPI hace un snapshot de las rutas en include_router (cualquier @api.* que
+# se declare después no quedaría registrado).
+# ---------------------------------------------------------------------------
+app.include_router(api)
