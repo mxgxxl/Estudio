@@ -48,6 +48,13 @@ JWT_ALGORITHM = "HS256"
 # Caducidad del token de acceso (por defecto 7 días)
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
 
+# Límites de uso de IA (generaciones por mes natural rodante, por plan).
+# Configurables por variable de entorno; valores por defecto razonables.
+FREE_AI_GENERATIONS_PER_MONTH = int(os.environ.get("FREE_AI_GENERATIONS_PER_MONTH", "30"))
+PREMIUM_AI_GENERATIONS_PER_MONTH = int(os.environ.get("PREMIUM_AI_GENERATIONS_PER_MONTH", "2000"))
+# Duración del periodo: mes natural rodante de 30 días.
+AI_PERIOD_DAYS = 30
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -58,6 +65,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("studyapp")
 
 logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
+logger.info(
+    "[AI-LIMITS] free=%s/mes premium=%s/mes period_days=%s",
+    FREE_AI_GENERATIONS_PER_MONTH, PREMIUM_AI_GENERATIONS_PER_MONTH, AI_PERIOD_DAYS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +488,7 @@ async def generate_questions_with_claude(
 async def evaluate_dev_answer(question: str, model_answer: str, user_answer: str, key_points: str) -> dict:
     """Use Gemini to evaluate a development answer and return score + feedback."""
     if not GEMINI_API_KEY or gemini_client is None:
-        return {"score": 0, "feedback": "IA no disponible para evaluar", "key_points_covered": []}
+        return {"score": 0, "feedback": "IA no disponible para evaluar", "key_points_covered": [], "_ai_error": True}
 
     system_msg = (
         "Eres un corrector experto. Evalúa la respuesta del alumno comparándola con la respuesta modelo. "
@@ -516,7 +527,7 @@ Devuelve SOLO este JSON:
         return result
     except Exception as e:
         logger.error("Dev answer eval error: %s", e)
-        return {"score": 0, "feedback": "Error al evaluar", "key_points_covered": [], "key_points_missing": []}
+        return {"score": 0, "feedback": "Error al evaluar", "key_points_covered": [], "key_points_missing": [], "_ai_error": True}
 
 
 def _now_iso() -> str:
@@ -552,6 +563,85 @@ async def get_current_user(
     if user is None:
         raise cred_exc
     return user
+
+
+# ---------------------------------------------------------------------------
+# Límites de uso de IA — cuota mensual por usuario
+# ---------------------------------------------------------------------------
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    """Parsea una fecha ISO; devuelve None si falta o es inválida.
+    Normaliza a UTC si viene sin tzinfo."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _ai_limit_for_plan(plan: Optional[str]) -> int:
+    """Límite de generaciones de IA por periodo según el plan."""
+    if plan == "premium":
+        return PREMIUM_AI_GENERATIONS_PER_MONTH
+    return FREE_AI_GENERATIONS_PER_MONTH
+
+
+async def check_and_consume_ai_quota(user: dict, cost: int = 1) -> dict:
+    """Comprueba el plan y la cuota mensual de IA del usuario y consume `cost`.
+
+    - Reinicia el periodo (used=0, period_start=now) si han pasado >= AI_PERIOD_DAYS
+      desde ai_period_start, ANTES de comprobar el límite.
+    - Si used + cost supera el límite del plan, lanza HTTPException 402.
+    - Si pasa, incrementa `ai_generations_used` de forma atómica ($inc) y devuelve
+      el estado {used, limit, remaining, period_start, plan}.
+
+    OBLIGATORIO: invocar esta función antes de CUALQUIER llamada a Gemini.
+    """
+    uid = user["id"]
+    plan = user.get("plan", "free")
+    limit = _ai_limit_for_plan(plan)
+
+    now = datetime.now(timezone.utc)
+    used = int(user.get("ai_generations_used", 0) or 0)
+    period_start = _parse_iso(user.get("ai_period_start"))
+
+    # Reinicio del periodo si procede (o si nunca se inicializó).
+    if period_start is None or (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
+        used = 0
+        period_start = now
+        await db.users.update_one(
+            {"id": uid},
+            {"$set": {"ai_generations_used": 0, "ai_period_start": now.isoformat()}},
+        )
+
+    if used + cost > limit:
+        raise HTTPException(
+            status_code=402,
+            detail="Has alcanzado el límite de generaciones de IA de este mes para tu plan",
+        )
+
+    # Consumo atómico.
+    await db.users.update_one({"id": uid}, {"$inc": {"ai_generations_used": cost}})
+    new_used = used + cost
+    return {
+        "used": new_used,
+        "limit": limit,
+        "remaining": max(0, limit - new_used),
+        "period_start": period_start.isoformat(),
+        "plan": plan,
+    }
+
+
+async def _refund_ai_quota(user: dict, cost: int = 1) -> None:
+    """Revierte un consumo previo (p. ej. si la llamada a Gemini falló).
+    No debe penalizarse al usuario por un fallo nuestro."""
+    try:
+        await db.users.update_one({"id": user["id"]}, {"$inc": {"ai_generations_used": -cost}})
+    except Exception as e:  # pragma: no cover - best effort
+        logger.error("No se pudo revertir la cuota de IA del usuario %s: %s", user.get("id"), e)
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +855,9 @@ async def upload_topic_pdf(
     if len(text) < 200:
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
 
+    # Comprobar plan + cuota ANTES de cualquier llamada a Gemini.
+    await check_and_consume_ai_quota(current_user)
+
     topic = Topic(
         user_id=uid,
         subject_id=subject_id,
@@ -788,11 +881,13 @@ async def upload_topic_pdf(
             custom_instructions=custom_instructions or "",
         )
     except Exception:
+        await _refund_ai_quota(current_user)
         await db.topics.delete_one({"id": topic.id})
         await db.pdfs.delete_one({"id": pdf_source.id})
         raise
 
     if not generated:
+        await _refund_ai_quota(current_user)
         await db.topics.delete_one({"id": topic.id})
         await db.pdfs.delete_one({"id": pdf_source.id})
         raise HTTPException(status_code=502, detail="La IA no generó preguntas válidas")
@@ -877,9 +972,15 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dic
         raise HTTPException(status_code=400, detail="num_questions debe estar entre 3 y 80")
 
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
-    generated = await generate_questions_with_claude(
-        topic["name"], pdf["text"], req.num_questions, question_type=req.question_type, num_options=nopts
-    )
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
+    try:
+        generated = await generate_questions_with_claude(
+            topic["name"], pdf["text"], req.num_questions, question_type=req.question_type, num_options=nopts
+        )
+    except Exception:
+        await _refund_ai_quota(current_user)
+        raise
     docs = []
     for g in generated:
         q = Question(
@@ -976,11 +1077,17 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, curr
     combined = "\n\n".join(parts)
 
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
-    generated = await generate_questions_with_claude(
-        topic["name"], combined, req.num_questions,
-        question_type=req.question_type, num_options=nopts,
-        custom_instructions=req.custom_instructions or "",
-    )
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
+    try:
+        generated = await generate_questions_with_claude(
+            topic["name"], combined, req.num_questions,
+            question_type=req.question_type, num_options=nopts,
+            custom_instructions=req.custom_instructions or "",
+        )
+    except Exception:
+        await _refund_ai_quota(current_user)
+        raise
 
     primary_pdf_id = pdfs[0]["id"]
     docs = []
@@ -1071,12 +1178,17 @@ async def eval_dev_answer(req: EvalDevReq, current_user: dict = Depends(get_curr
     if q.get("question_type") != "dev":
         raise HTTPException(status_code=400, detail="Solo para preguntas de desarrollo")
 
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
     result = await evaluate_dev_answer(
         q["question"],
         q.get("model_answer", ""),
         req.user_answer,
         q.get("explanation", ""),
     )
+    # evaluate_dev_answer no lanza: si falló internamente, revertir el consumo.
+    if result.pop("_ai_error", False):
+        await _refund_ai_quota(current_user)
     return result
 
 
@@ -1544,8 +1656,12 @@ async def generate_topic_flashcards(topic_id: str, num_cards: int = 15, current_
     combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text']}" for p in pdfs])
     num_cards = max(5, min(30, num_cards))
 
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
     cards = await _generate_flashcards_from_text(topic["name"], combined, num_cards)
     if not cards:
+        # _generate_flashcards_from_text devuelve [] en fallo: revertir el consumo.
+        await _refund_ai_quota(current_user)
         raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
 
     docs = []
@@ -1616,6 +1732,8 @@ class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: str
     plan: str = "free"
+    ai_generations_used: int = 0
+    ai_period_start: str = Field(default_factory=_now_iso)
     created_at: str = Field(default_factory=_now_iso)
 
 
@@ -1679,6 +1797,35 @@ async def login(req: LoginReq):
 @api.get("/auth/me", response_model=User)
 async def me(current_user: dict = Depends(get_current_user)):
     return current_user
+
+
+@api.get("/usage/me")
+async def usage_me(current_user: dict = Depends(get_current_user)):
+    """Estado de uso de IA del usuario para mostrar el contador en el frontend.
+
+    Es de solo lectura: refleja el reinicio del periodo si ya ha expirado, pero
+    NO consume ni escribe (el reinicio real se hace al consumir)."""
+    plan = current_user.get("plan", "free")
+    limit = _ai_limit_for_plan(plan)
+    now = datetime.now(timezone.utc)
+    used = int(current_user.get("ai_generations_used", 0) or 0)
+    period_start = _parse_iso(current_user.get("ai_period_start")) or now
+
+    # Si el periodo ya expiró, mostrar el estado como reiniciado.
+    if (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
+        used = 0
+        period_start = now
+
+    reset_at = period_start + timedelta(days=AI_PERIOD_DAYS)
+    days_until_reset = max(0, (reset_at - now).days)
+    return {
+        "plan": plan,
+        "used": used,
+        "limit": limit,
+        "remaining": max(0, limit - used),
+        "period_start": period_start.isoformat(),
+        "days_until_reset": days_until_reset,
+    }
 
 
 # --- CORS ---
@@ -1873,6 +2020,9 @@ async def generate_topic_summary(topic_id: str, current_user: dict = Depends(get
     if not GEMINI_API_KEY or gemini_client is None:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
 
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
+
     combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text'][:30000]}" for p in pdfs])[:80000]
 
     system_msg = (
@@ -1915,6 +2065,7 @@ TEMARIO:
         summary = json.loads(raw)
         return summary
     except Exception as e:
+        await _refund_ai_quota(current_user)
         logger.error("Summary generation error: %s", e)
         raise HTTPException(status_code=502, detail="Error al generar el resumen")
 
