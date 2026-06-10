@@ -13,12 +13,18 @@ Características:
 - Imprime cuántos documentos actualiza por colección.
 - NO crea usuarios: el email debe existir ya en la colección `users` (regístralo
   por la app antes de migrar).
+- MODO DRY RUN: con DRY_RUN=1 (o pasando --dry-run) NO escribe nada en Mongo; solo
+  cuenta y muestra cuántos huérfanos se asignarían por colección.
 
-Uso:
+Uso (dry run — no escribe nada):
+    cd backend
+    DRY_RUN=1 LEGACY_OWNER_EMAIL=tu-email@ejemplo.com .venv/bin/python scripts/migrate_assign_owner.py
+
+Uso (real):
     cd backend
     LEGACY_OWNER_EMAIL=tu-email@ejemplo.com .venv/bin/python scripts/migrate_assign_owner.py
 
-Variables de entorno usadas: MONGO_URL, DB_NAME (de .env) y LEGACY_OWNER_EMAIL.
+Variables de entorno usadas: MONGO_URL, DB_NAME (de .env), LEGACY_OWNER_EMAIL y DRY_RUN.
 """
 import os
 import sys
@@ -54,6 +60,8 @@ ORPHAN_FILTER = {
 
 
 async def main() -> int:
+    dry_run = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "True") or "--dry-run" in sys.argv[1:]
+
     owner_email = os.environ.get("LEGACY_OWNER_EMAIL", "").strip().lower()
     if not owner_email:
         print("ERROR: define LEGACY_OWNER_EMAIL con el email del usuario propietario.")
@@ -77,6 +85,8 @@ async def main() -> int:
 
         owner_id = user["id"]
         print(f"Propietario destino: {owner_email} (id={owner_id})")
+        if dry_run:
+            print("(DRY RUN: no se escribirá nada en Mongo)")
         print("-" * 60)
 
         total = 0
@@ -86,13 +96,19 @@ async def main() -> int:
             if orphans == 0:
                 print(f"  {coll_name:18s}: 0 huérfanos (nada que hacer)")
                 continue
-            res = await coll.update_many(ORPHAN_FILTER, {"$set": {"user_id": owner_id}})
-            print(f"  {coll_name:18s}: {res.modified_count} documentos actualizados")
-            total += res.modified_count
+            if dry_run:
+                print(f"  {coll_name:18s}: {orphans} huérfanos -> se asignarían a {owner_email}")
+            else:
+                res = await coll.update_many(ORPHAN_FILTER, {"$set": {"user_id": owner_id}})
+                print(f"  {coll_name:18s}: {res.modified_count} documentos actualizados")
+                total += res.modified_count
 
         print("-" * 60)
-        print(f"TOTAL actualizados: {total}")
-        print("Migración completada. Es idempotente: re-ejecutarla actualizará 0 documentos.")
+        if dry_run:
+            print("MODO DRY RUN: no se ha escrito nada")
+        else:
+            print(f"TOTAL actualizados: {total}")
+            print("Migración completada. Es idempotente: re-ejecutarla actualizará 0 documentos.")
         return 0
     finally:
         client.close()
