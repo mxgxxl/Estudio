@@ -1,9 +1,31 @@
-import { Sparkles, X } from "lucide-react";
+import { useState } from "react";
+import { Loader2, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
+import { startPremiumCheckout } from "@/lib/paddle";
 
-// Aviso de "límite alcanzado" con botón placeholder "Hazte Premium".
-// La lógica de pago llega en el Bloque 4 (Stripe); aquí solo es informativo.
+// Aviso de "límite alcanzado" con botón "Hazte Premium" que abre el checkout de Paddle.
 export default function PremiumDialog({ open, onClose, detail }) {
+    const { user } = useAuth();
+    const [loading, setLoading] = useState(false);
+
+    const onPremium = async () => {
+        setLoading(true);
+        try {
+            await startPremiumCheckout(user?.email);
+            onClose?.();
+        } catch (err) {
+            if (err?.response?.status === 409) {
+                toast.info("Ya tienes una suscripción Premium activa");
+                onClose?.();
+            } else {
+                toast.error(err?.response?.data?.detail || "No se pudo iniciar el pago");
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
     if (!open) return null;
 
     return (
@@ -53,11 +75,12 @@ export default function PremiumDialog({ open, onClose, detail }) {
                     <button
                         type="button"
                         data-testid="go-premium-btn"
-                        onClick={() => toast.info("Los pagos llegarán muy pronto 🚀")}
-                        className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white transition-all"
+                        onClick={onPremium}
+                        disabled={loading}
+                        className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white transition-all disabled:opacity-60"
                         style={{ background: "var(--brand)" }}
                     >
-                        <Sparkles className="w-4 h-4" />
+                        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                         Hazte Premium
                     </button>
                 </div>

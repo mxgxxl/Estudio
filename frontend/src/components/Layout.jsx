@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, BarChart3, BookOpen, LogOut } from "lucide-react";
+import { LayoutDashboard, BarChart3, BookOpen, LogOut, User } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import UsageBadge from "@/components/UsageBadge";
 import PremiumDialog from "@/components/PremiumDialog";
@@ -9,6 +9,7 @@ const navItems = [
     { to: "/", label: "Inicio", icon: LayoutDashboard, exact: true, testid: "nav-home" },
     { to: "/quiz/setup", label: "Estudiar", icon: BookOpen, testid: "nav-quiz" },
     { to: "/stats", label: "Estadísticas", icon: BarChart3, testid: "nav-stats" },
+    { to: "/cuenta", label: "Cuenta", icon: User, testid: "nav-account" },
 ];
 
 export default function Layout() {

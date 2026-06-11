@@ -27,6 +27,17 @@ export function AuthProvider({ children }) {
             .catch(() => null);
     }, []);
 
+    // Refresca el documento del usuario (p. ej. el plan tras un pago).
+    const refreshUser = useCallback(() => {
+        if (!getToken()) return Promise.resolve(null);
+        return getMe()
+            .then((me) => {
+                setUser(me);
+                return me;
+            })
+            .catch(() => null);
+    }, []);
+
     // Al arrancar la app, si hay token guardado, recuperamos el usuario y el uso.
     useEffect(() => {
         const token = getToken();
@@ -53,6 +64,22 @@ export function AuthProvider({ children }) {
         return () => window.removeEventListener("studia:ai-generated", onGenerated);
     }, [refreshUsage]);
 
+    // Tras completar un checkout de Paddle, el webhook actualiza el plan en el
+    // backend; refrescamos usuario y contador (con un pequeño margen para que el
+    // webhook llegue). El panel de cuenta también refresca su estado.
+    useEffect(() => {
+        const onCheckout = () => {
+            const tick = () => {
+                refreshUser();
+                refreshUsage();
+            };
+            tick();
+            setTimeout(tick, 2500);
+        };
+        window.addEventListener("studia:checkout-completed", onCheckout);
+        return () => window.removeEventListener("studia:checkout-completed", onCheckout);
+    }, [refreshUser, refreshUsage]);
+
     const login = async (email, password) => {
         const { access_token } = await apiLogin(email, password);
         setToken(access_token);
@@ -75,7 +102,7 @@ export function AuthProvider({ children }) {
 
     return (
         <AuthContext.Provider
-            value={{ user, usage, loading, isAuthenticated: !!user, login, register, logout, refreshUsage }}
+            value={{ user, usage, loading, isAuthenticated: !!user, login, register, logout, refreshUsage, refreshUser }}
         >
             {children}
         </AuthContext.Provider>

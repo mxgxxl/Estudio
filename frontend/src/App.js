@@ -11,6 +11,7 @@ import TopicDetail from "@/pages/TopicDetail";
 import Stats from "@/pages/Stats";
 import FlashcardMode from "@/pages/FlashcardMode";
 import SurvivalMode from "@/pages/SurvivalMode";
+import Account from "@/pages/Account";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -37,6 +38,7 @@ function App() {
                                 <Route path="/stats" element={<Stats />} />
                                 <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
                                 <Route path="/supervivencia" element={<SurvivalMode />} />
+                                <Route path="/cuenta" element={<Account />} />
                             </Route>
                         </Route>
                     </Routes>

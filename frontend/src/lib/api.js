@@ -64,6 +64,10 @@ export const getMe = () => api.get("/auth/me").then((r) => r.data);
 // Uso de IA (contador de generaciones del mes para el plan del usuario)
 export const getUsage = () => api.get("/usage/me").then((r) => r.data);
 
+// Billing (Paddle)
+export const billingCheckout = () => api.post("/billing/checkout").then((r) => r.data);
+export const billingStatus = () => api.get("/billing/status").then((r) => r.data);
+
 // Subjects
 export const listSubjects = () => api.get("/subjects").then((r) => r.data);
 export const createSubject = (data) => api.post("/subjects", data).then((r) => r.data);
