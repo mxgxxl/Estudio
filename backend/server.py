@@ -6,6 +6,8 @@ import os
 import io
 import re
 import json
+import hmac
+import hashlib
 import uuid
 import logging
 import random
@@ -13,7 +15,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -55,6 +57,12 @@ PREMIUM_AI_GENERATIONS_PER_MONTH = int(os.environ.get("PREMIUM_AI_GENERATIONS_PE
 # Duración del periodo: mes natural rodante de 30 días.
 AI_PERIOD_DAYS = 30
 
+# Paddle (Billing v4) — pasarela de pagos. Por defecto en sandbox.
+PADDLE_ENV = os.environ.get("PADDLE_ENV", "sandbox")
+PADDLE_API_KEY = os.environ.get("PADDLE_API_KEY", "")
+PADDLE_WEBHOOK_SECRET = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
+PADDLE_PREMIUM_PRICE_ID = os.environ.get("PADDLE_PREMIUM_PRICE_ID", "")
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -68,6 +76,10 @@ logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEM
 logger.info(
     "[AI-LIMITS] free=%s/mes premium=%s/mes period_days=%s",
     FREE_AI_GENERATIONS_PER_MONTH, PREMIUM_AI_GENERATIONS_PER_MONTH, AI_PERIOD_DAYS,
+)
+logger.info(
+    "[PADDLE] env=%s api_key_present=%s webhook_secret_present=%s price_id_present=%s",
+    PADDLE_ENV, bool(PADDLE_API_KEY), bool(PADDLE_WEBHOOK_SECRET), bool(PADDLE_PREMIUM_PRICE_ID),
 )
 
 
@@ -642,6 +654,87 @@ async def _refund_ai_quota(user: dict, cost: int = 1) -> None:
         await db.users.update_one({"id": user["id"]}, {"$inc": {"ai_generations_used": -cost}})
     except Exception as e:  # pragma: no cover - best effort
         logger.error("No se pudo revertir la cuota de IA del usuario %s: %s", user.get("id"), e)
+
+
+# ---------------------------------------------------------------------------
+# Pagos / Suscripción (Paddle Billing v4)
+# ---------------------------------------------------------------------------
+# El plan "premium" se deriva SIEMPRE del estado de la suscripción (única fuente
+# de verdad). No se escribe plan="premium" a mano en ningún otro sitio.
+_PREMIUM_STATUSES = ("active", "trialing")
+
+
+def _plan_for_subscription_status(status: Optional[str]) -> str:
+    """Deriva el plan ('premium'/'free') a partir del estado de la suscripción."""
+    return "premium" if status in _PREMIUM_STATUSES else "free"
+
+
+def _is_premium_active(user: dict) -> bool:
+    return user.get("subscription_status") in _PREMIUM_STATUSES
+
+
+def _verify_paddle_signature(raw_body: bytes, signature_header: str, secret: str) -> bool:
+    """Verifica la firma de un webhook de Paddle Billing v4.
+
+    La cabecera 'Paddle-Signature' tiene el formato 'ts=<unix>;h1=<hmac_hex>'.
+    Se calcula HMAC-SHA256 de '<ts>:<raw_body>' usando el secret del conjunto de
+    notificaciones (pdl_ntfset_...) y se compara con h1 en tiempo constante.
+    """
+    if not secret or not signature_header:
+        return False
+    parts: dict = {}
+    for seg in signature_header.split(";"):
+        if "=" in seg:
+            k, v = seg.split("=", 1)
+            parts[k.strip()] = v.strip()
+    ts = parts.get("ts")
+    h1 = parts.get("h1")
+    if not ts or not h1:
+        return False
+    signed_payload = f"{ts}:".encode("utf-8") + raw_body
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, h1)
+
+
+def _extract_customer_email(data: dict) -> Optional[str]:
+    """Extrae el email del cliente del payload de Paddle (varias ubicaciones)."""
+    if not isinstance(data, dict):
+        return None
+    customer = data.get("customer") if isinstance(data.get("customer"), dict) else {}
+    custom = data.get("custom_data") if isinstance(data.get("custom_data"), dict) else {}
+    billing = data.get("billing_details") if isinstance(data.get("billing_details"), dict) else {}
+    for c in (data.get("customer_email"), customer.get("email"), custom.get("email"), billing.get("email")):
+        if c:
+            return str(c)
+    return None
+
+
+async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
+    """Aplica el efecto de un evento de Paddle al documento del usuario."""
+    updates: dict = {}
+
+    if event_type and event_type.startswith("subscription."):
+        # El estado real viene en data.status (active|trialing|canceled|past_due|...).
+        status = data.get("status") or ("canceled" if event_type == "subscription.canceled" else "active")
+        updates["subscription_status"] = status
+        updates["plan"] = _plan_for_subscription_status(status)
+        if data.get("id"):
+            updates["paddle_subscription_id"] = data["id"]
+        if data.get("customer_id"):
+            updates["paddle_customer_id"] = data["customer_id"]
+        period_end = (data.get("current_billing_period") or {}).get("ends_at")
+        if period_end:
+            updates["subscription_current_period_end"] = period_end
+
+    elif event_type == "transaction.completed":
+        # Solo informativo: guardamos ids si vienen, sin decidir el plan.
+        if data.get("customer_id"):
+            updates["paddle_customer_id"] = data["customer_id"]
+        if data.get("subscription_id"):
+            updates["paddle_subscription_id"] = data["subscription_id"]
+
+    if updates:
+        await db.users.update_one({"id": user["id"]}, {"$set": updates})
 
 
 # ---------------------------------------------------------------------------
@@ -1734,6 +1827,11 @@ class User(BaseModel):
     plan: str = "free"
     ai_generations_used: int = 0
     ai_period_start: str = Field(default_factory=_now_iso)
+    # Suscripción (Paddle Billing v4)
+    subscription_status: str = "free"  # free | active | canceled | past_due | trialing
+    paddle_customer_id: Optional[str] = None
+    paddle_subscription_id: Optional[str] = None
+    subscription_current_period_end: Optional[str] = None
     created_at: str = Field(default_factory=_now_iso)
 
 
@@ -1826,6 +1924,96 @@ async def usage_me(current_user: dict = Depends(get_current_user)):
         "period_start": period_start.isoformat(),
         "days_until_reset": days_until_reset,
     }
+
+
+# ---------------------------------------------------------------------------
+# Billing (Paddle) — checkout, estado y webhook
+# ---------------------------------------------------------------------------
+@api.post("/billing/checkout")
+async def billing_checkout(current_user: dict = Depends(get_current_user)):
+    """Datos que el frontend necesita para abrir el Paddle Overlay Checkout.
+    Si el usuario ya es Premium activo, devuelve 409."""
+    if _is_premium_active(current_user):
+        raise HTTPException(status_code=409, detail="Ya tienes una suscripción Premium activa")
+    if not PADDLE_PREMIUM_PRICE_ID:
+        raise HTTPException(status_code=500, detail="PADDLE_PREMIUM_PRICE_ID no configurado en el servidor")
+    return {
+        "price_id": PADDLE_PREMIUM_PRICE_ID,
+        "client_token_env": PADDLE_ENV,
+        "customer_email": current_user["email"],
+    }
+
+
+@api.get("/billing/status")
+async def billing_status(current_user: dict = Depends(get_current_user)):
+    """Estado de la suscripción del usuario para el panel de cuenta."""
+    return {
+        "plan": current_user.get("plan", "free"),
+        "subscription_status": current_user.get("subscription_status", "free"),
+        "current_period_end": current_user.get("subscription_current_period_end"),
+        "paddle_subscription_id": current_user.get("paddle_subscription_id"),
+    }
+
+
+@api.post("/webhooks/paddle")
+async def paddle_webhook(request: Request):
+    """Recibe los webhooks de Paddle Billing v4.
+
+    - SIN auth ni cuota. Verifica la firma con PADDLE_WEBHOOK_SECRET.
+    - Idempotente por event_id (colección paddle_events).
+    - Si no encuentra al usuario, responde 200 (log warning) para que Paddle
+      no reintente indefinidamente.
+    """
+    raw = await request.body()
+    signature = request.headers.get("Paddle-Signature", "")
+    if not _verify_paddle_signature(raw, signature, PADDLE_WEBHOOK_SECRET):
+        logger.warning("[PADDLE] firma de webhook inválida")
+        raise HTTPException(status_code=401, detail="Firma de webhook inválida")
+
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="JSON inválido")
+
+    event_id = payload.get("event_id")
+    event_type = payload.get("event_type")
+    data = payload.get("data") or {}
+
+    # Idempotencia: si ya procesamos este event_id, no repetimos.
+    if event_id and await db.paddle_events.find_one({"event_id": event_id}):
+        logger.info("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
+        return {"ok": True, "duplicate": True}
+
+    # Localizar al usuario: por email del payload y, si no, por ids ya conocidos.
+    email = _extract_customer_email(data)
+    user = None
+    if email:
+        user = await db.users.find_one({"email": email.lower().strip()})
+    if user is None and data.get("id"):
+        user = await db.users.find_one({"paddle_subscription_id": data["id"]})
+    if user is None and data.get("subscription_id"):
+        user = await db.users.find_one({"paddle_subscription_id": data["subscription_id"]})
+    if user is None and data.get("customer_id"):
+        user = await db.users.find_one({"paddle_customer_id": data["customer_id"]})
+
+    if user is None:
+        logger.warning(
+            "[PADDLE] usuario no encontrado event_id=%s type=%s email=%s", event_id, event_type, email
+        )
+        if event_id:
+            await db.paddle_events.insert_one(
+                {"event_id": event_id, "event_type": event_type, "user_id": None, "processed_at": _now_iso()}
+            )
+        return {"ok": True, "user_found": False}
+
+    await _apply_paddle_event(user, event_type, data)
+
+    if event_id:
+        await db.paddle_events.insert_one(
+            {"event_id": event_id, "event_type": event_type, "user_id": user["id"], "processed_at": _now_iso()}
+        )
+    logger.info("[PADDLE] procesado event_id=%s type=%s user_id=%s", event_id, event_type, user["id"])
+    return {"ok": True}
 
 
 # --- CORS ---
