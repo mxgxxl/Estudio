@@ -11,6 +11,7 @@ import hashlib
 import uuid
 import logging
 import random
+import httpx
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
@@ -697,15 +698,74 @@ def _verify_paddle_signature(raw_body: bytes, signature_header: str, secret: str
 
 
 def _extract_customer_email(data: dict) -> Optional[str]:
-    """Extrae el email del cliente del payload de Paddle (varias ubicaciones)."""
+    """Extrae el email del cliente SI viene embebido en el payload de Paddle.
+
+    En Paddle Billing v4 el email del cliente está en data.customer.email (objeto
+    customer anidado). Comprobamos también otras ubicaciones por robustez. OJO: en
+    muchos eventos subscription.* el objeto customer NO viene (solo customer_id);
+    en ese caso hay que resolverlo vía API (ver _resolve_customer_email)."""
     if not isinstance(data, dict):
         return None
     customer = data.get("customer") if isinstance(data.get("customer"), dict) else {}
     custom = data.get("custom_data") if isinstance(data.get("custom_data"), dict) else {}
     billing = data.get("billing_details") if isinstance(data.get("billing_details"), dict) else {}
-    for c in (data.get("customer_email"), customer.get("email"), custom.get("email"), billing.get("email")):
+    for c in (customer.get("email"), data.get("customer_email"), custom.get("email"), billing.get("email")):
         if c:
             return str(c)
+    return None
+
+
+# Caché en memoria customer_id -> email para no llamar a la API de Paddle en cada evento.
+_paddle_customer_email_cache: dict = {}
+
+
+def _paddle_api_base() -> str:
+    """Base de la API de Paddle según el entorno (sandbox/production)."""
+    return "https://sandbox-api.paddle.com" if PADDLE_ENV == "sandbox" else "https://api.paddle.com"
+
+
+async def _fetch_paddle_customer_email(customer_id: str) -> Optional[str]:
+    """Resuelve el email de un cliente llamando a GET /customers/{id} de Paddle.
+    Cachea el resultado. Devuelve None (con log) si no se puede resolver."""
+    if not customer_id:
+        return None
+    if customer_id in _paddle_customer_email_cache:
+        return _paddle_customer_email_cache[customer_id]
+    if not PADDLE_API_KEY:
+        logger.warning(
+            "[PADDLE] no se puede resolver email: PADDLE_API_KEY no configurada (customer_id=%s)", customer_id
+        )
+        return None
+    url = f"{_paddle_api_base()}/customers/{customer_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(url, headers={"Authorization": f"Bearer {PADDLE_API_KEY}"})
+    except Exception as e:
+        logger.warning("[PADDLE] error consultando customer %s: %s", customer_id, e)
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "[PADDLE] GET /customers/%s devolvió HTTP %s: %s", customer_id, resp.status_code, resp.text[:300]
+        )
+        return None
+    try:
+        email = (resp.json().get("data") or {}).get("email")
+    except Exception as e:
+        logger.warning("[PADDLE] respuesta no-JSON al resolver customer %s: %s", customer_id, e)
+        return None
+    if email:
+        _paddle_customer_email_cache[customer_id] = email
+    return email
+
+
+async def _resolve_customer_email(data: dict) -> Optional[str]:
+    """Obtiene el email del cliente: primero del payload, si no vía API por customer_id."""
+    email = _extract_customer_email(data)
+    if email:
+        return email
+    customer_id = data.get("customer_id") if isinstance(data, dict) else None
+    if customer_id:
+        return await _fetch_paddle_customer_email(customer_id)
     return None
 
 
@@ -1984,8 +2044,20 @@ async def paddle_webhook(request: Request):
         logger.info("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
         return {"ok": True, "duplicate": True}
 
-    # Localizar al usuario: por email del payload y, si no, por ids ya conocidos.
-    email = _extract_customer_email(data)
+    # Resolver el email del cliente (payload o, si falta, vía API por customer_id).
+    email = await _resolve_customer_email(data)
+    if email:
+        logger.info(
+            "[PADDLE] email resuelto=%s event_id=%s type=%s customer_id=%s",
+            email, event_id, event_type, data.get("customer_id"),
+        )
+    else:
+        logger.warning(
+            "[PADDLE] no se pudo resolver email event_id=%s type=%s customer_id=%s",
+            event_id, event_type, data.get("customer_id"),
+        )
+
+    # Localizar al usuario: por email y, si no, por ids ya conocidos.
     user = None
     if email:
         user = await db.users.find_one({"email": email.lower().strip()})

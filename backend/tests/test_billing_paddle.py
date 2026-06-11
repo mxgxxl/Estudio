@@ -155,3 +155,74 @@ class TestWebhook:
         st = client.get("/api/billing/status", headers=h).json()
         assert st["plan"] == "free"
         assert st["subscription_status"] == "canceled"
+
+
+def _sub_event_nested(event_id, event_type, status, email,
+                      sub_id="sub_nested_1", cust_id="ctm_nested_1", ends_at="2099-01-01T00:00:00Z"):
+    """Payload con la ESTRUCTURA REAL de Paddle Billing v4: email dentro de data.customer."""
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "occurred_at": "2026-01-01T00:00:00Z",
+        "data": {
+            "id": sub_id,
+            "status": status,
+            "customer_id": cust_id,
+            "customer": {"id": cust_id, "email": email},
+            "current_billing_period": {"starts_at": "2026-01-01T00:00:00Z", "ends_at": ends_at},
+        },
+    }
+
+
+def _sub_event_no_email(event_id, event_type, status,
+                        sub_id="sub_apionly_1", cust_id="ctm_apionly_1", ends_at="2099-01-01T00:00:00Z"):
+    """Payload SIN email embebido: solo customer_id (hay que resolver vía API)."""
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "occurred_at": "2026-01-01T00:00:00Z",
+        "data": {
+            "id": sub_id,
+            "status": status,
+            "customer_id": cust_id,
+            "current_billing_period": {"starts_at": "2026-01-01T00:00:00Z", "ends_at": ends_at},
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# Resolución del email del cliente (fix del bug email=None)
+# --------------------------------------------------------------------------
+class TestCustomerEmailResolution:
+    def test_email_from_nested_customer_object(self, client):
+        """Estructura real: el email viene en data.customer.email."""
+        assert _register(client, "nested@test.com").status_code == 201
+        ev = _sub_event_nested("evt_nested_1", "subscription.activated", "active", "nested@test.com")
+        r = _post_webhook(client, ev)
+        assert r.status_code == 200, r.text
+        h = _login(client, "nested@test.com")
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium"
+        assert st["subscription_status"] == "active"
+
+    def test_email_resolved_via_paddle_api(self, client, srv, monkeypatch):
+        """Sin email embebido: se resuelve por customer_id vía la API de Paddle."""
+        assert _register(client, "apionly@test.com").status_code == 201
+
+        calls = {"n": 0}
+
+        async def _fake_fetch(customer_id):
+            calls["n"] += 1
+            return "apionly@test.com" if customer_id == "ctm_apionly_1" else None
+
+        monkeypatch.setattr(srv, "_fetch_paddle_customer_email", _fake_fetch)
+
+        ev = _sub_event_no_email("evt_apionly_1", "subscription.activated", "active")
+        r = _post_webhook(client, ev)
+        assert r.status_code == 200, r.text
+        assert calls["n"] == 1  # se llamó a la resolución por API
+
+        h = _login(client, "apionly@test.com")
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium"
+        assert st["paddle_subscription_id"] == "sub_apionly_1"
