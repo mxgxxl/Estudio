@@ -755,6 +755,9 @@ async def _fetch_paddle_customer_email(customer_id: str) -> Optional[str]:
         return None
     if email:
         _paddle_customer_email_cache[customer_id] = email
+        logger.info("[PADDLE] email resuelto vía API para customer_id=%s: %s", customer_id, email)
+    else:
+        logger.warning("[PADDLE] API de Paddle devolvió email vacío para customer_id=%s", customer_id)
     return email
 
 
@@ -762,8 +765,14 @@ async def _resolve_customer_email(data: dict) -> Optional[str]:
     """Obtiene el email del cliente: primero del payload, si no vía API por customer_id."""
     email = _extract_customer_email(data)
     if email:
+        logger.info("[PADDLE] email obtenido del payload (data.customer.email): %s", email)
         return email
     customer_id = data.get("customer_id") if isinstance(data, dict) else None
+    logger.info(
+        "[PADDLE] email no venía en el payload; resolviendo vía API "
+        "customer_id=%s PADDLE_API_KEY_present=%s",
+        customer_id, bool(PADDLE_API_KEY),
+    )
     if customer_id:
         return await _fetch_paddle_customer_email(customer_id)
     return None
@@ -785,6 +794,10 @@ async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
         period_end = (data.get("current_billing_period") or {}).get("ends_at")
         if period_end:
             updates["subscription_current_period_end"] = period_end
+        logger.info(
+            "[PADDLE] _apply_paddle_event type=%s status=%s -> plan=%s user_id=%s",
+            event_type, status, updates.get("plan"), user["id"],
+        )
 
     elif event_type == "transaction.completed":
         # Solo informativo: guardamos ids si vienen, sin decidir el plan.
@@ -792,9 +805,21 @@ async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
             updates["paddle_customer_id"] = data["customer_id"]
         if data.get("subscription_id"):
             updates["paddle_subscription_id"] = data["subscription_id"]
+        logger.info(
+            "[PADDLE] _apply_paddle_event type=%s (informativo, no cambia plan) user_id=%s",
+            event_type, user["id"],
+        )
 
     if updates:
-        await db.users.update_one({"id": user["id"]}, {"$set": updates})
+        result = await db.users.update_one({"id": user["id"]}, {"$set": updates})
+        logger.info(
+            "[PADDLE] update Mongo user_id=%s fields=%s matched=%s modified=%s",
+            user["id"], list(updates.keys()), result.matched_count, result.modified_count,
+        )
+    else:
+        logger.info(
+            "[PADDLE] evento sin cambios que aplicar type=%s user_id=%s", event_type, user["id"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2026,8 +2051,18 @@ async def paddle_webhook(request: Request):
     """
     raw = await request.body()
     signature = request.headers.get("Paddle-Signature", "")
+
+    # Log de entrada: qué llegó, antes de verificar la firma (útil para depurar).
+    logger.info(
+        "[PADDLE] webhook recibido env=%s body_bytes=%s signature_present=%s secret_present=%s",
+        PADDLE_ENV, len(raw), bool(signature), bool(PADDLE_WEBHOOK_SECRET),
+    )
+
     if not _verify_paddle_signature(raw, signature, PADDLE_WEBHOOK_SECRET):
-        logger.warning("[PADDLE] firma de webhook inválida")
+        logger.warning(
+            "[PADDLE] firma de webhook inválida signature_present=%s secret_present=%s",
+            bool(signature), bool(PADDLE_WEBHOOK_SECRET),
+        )
         raise HTTPException(status_code=401, detail="Firma de webhook inválida")
 
     try:
@@ -2038,6 +2073,10 @@ async def paddle_webhook(request: Request):
     event_id = payload.get("event_id")
     event_type = payload.get("event_type")
     data = payload.get("data") or {}
+    logger.info(
+        "[PADDLE] webhook firmado OK event_id=%s type=%s customer_id=%s subscription_id=%s",
+        event_id, event_type, data.get("customer_id"), data.get("id") or data.get("subscription_id"),
+    )
 
     # Idempotencia: si ya procesamos este event_id, no repetimos.
     if event_id and await db.paddle_events.find_one({"event_id": event_id}):
@@ -2070,7 +2109,10 @@ async def paddle_webhook(request: Request):
 
     if user is None:
         logger.warning(
-            "[PADDLE] usuario no encontrado event_id=%s type=%s email=%s", event_id, event_type, email
+            "[PADDLE] usuario no encontrado event_id=%s type=%s email=%s "
+            "intentos_ids: sub_id(data.id)=%s subscription_id=%s customer_id=%s",
+            event_id, event_type, email,
+            data.get("id"), data.get("subscription_id"), data.get("customer_id"),
         )
         if event_id:
             await db.paddle_events.insert_one(
