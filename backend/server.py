@@ -70,8 +70,15 @@ bearer_scheme = HTTPBearer(auto_error=False)
 app = FastAPI(title="Study App API")
 api = APIRouter(prefix="/api")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Nivel de logging configurable por entorno (por defecto INFO).
+# Sube a DEBUG (LOG_LEVEL=DEBUG) para ver las trazas rutinarias de Paddle.
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger("studyapp")
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
 logger.info(
@@ -755,7 +762,7 @@ async def _fetch_paddle_customer_email(customer_id: str) -> Optional[str]:
         return None
     if email:
         _paddle_customer_email_cache[customer_id] = email
-        logger.info("[PADDLE] email resuelto vía API para customer_id=%s: %s", customer_id, email)
+        logger.debug("[PADDLE] email resuelto vía API para customer_id=%s: %s", customer_id, email)
     else:
         logger.warning("[PADDLE] API de Paddle devolvió email vacío para customer_id=%s", customer_id)
     return email
@@ -765,10 +772,10 @@ async def _resolve_customer_email(data: dict) -> Optional[str]:
     """Obtiene el email del cliente: primero del payload, si no vía API por customer_id."""
     email = _extract_customer_email(data)
     if email:
-        logger.info("[PADDLE] email obtenido del payload (data.customer.email): %s", email)
+        logger.debug("[PADDLE] email obtenido del payload (data.customer.email): %s", email)
         return email
     customer_id = data.get("customer_id") if isinstance(data, dict) else None
-    logger.info(
+    logger.debug(
         "[PADDLE] email no venía en el payload; resolviendo vía API "
         "customer_id=%s PADDLE_API_KEY_present=%s",
         customer_id, bool(PADDLE_API_KEY),
@@ -794,7 +801,7 @@ async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
         period_end = (data.get("current_billing_period") or {}).get("ends_at")
         if period_end:
             updates["subscription_current_period_end"] = period_end
-        logger.info(
+        logger.debug(
             "[PADDLE] _apply_paddle_event type=%s status=%s -> plan=%s user_id=%s",
             event_type, status, updates.get("plan"), user["id"],
         )
@@ -805,19 +812,19 @@ async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
             updates["paddle_customer_id"] = data["customer_id"]
         if data.get("subscription_id"):
             updates["paddle_subscription_id"] = data["subscription_id"]
-        logger.info(
+        logger.debug(
             "[PADDLE] _apply_paddle_event type=%s (informativo, no cambia plan) user_id=%s",
             event_type, user["id"],
         )
 
     if updates:
         result = await db.users.update_one({"id": user["id"]}, {"$set": updates})
-        logger.info(
+        logger.debug(
             "[PADDLE] update Mongo user_id=%s fields=%s matched=%s modified=%s",
             user["id"], list(updates.keys()), result.matched_count, result.modified_count,
         )
     else:
-        logger.info(
+        logger.debug(
             "[PADDLE] evento sin cambios que aplicar type=%s user_id=%s", event_type, user["id"]
         )
 
@@ -2053,7 +2060,7 @@ async def paddle_webhook(request: Request):
     signature = request.headers.get("Paddle-Signature", "")
 
     # Log de entrada: qué llegó, antes de verificar la firma (útil para depurar).
-    logger.info(
+    logger.debug(
         "[PADDLE] webhook recibido env=%s body_bytes=%s signature_present=%s secret_present=%s",
         PADDLE_ENV, len(raw), bool(signature), bool(PADDLE_WEBHOOK_SECRET),
     )
@@ -2073,20 +2080,20 @@ async def paddle_webhook(request: Request):
     event_id = payload.get("event_id")
     event_type = payload.get("event_type")
     data = payload.get("data") or {}
-    logger.info(
+    logger.debug(
         "[PADDLE] webhook firmado OK event_id=%s type=%s customer_id=%s subscription_id=%s",
         event_id, event_type, data.get("customer_id"), data.get("id") or data.get("subscription_id"),
     )
 
     # Idempotencia: si ya procesamos este event_id, no repetimos.
     if event_id and await db.paddle_events.find_one({"event_id": event_id}):
-        logger.info("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
+        logger.debug("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
         return {"ok": True, "duplicate": True}
 
     # Resolver el email del cliente (payload o, si falta, vía API por customer_id).
     email = await _resolve_customer_email(data)
     if email:
-        logger.info(
+        logger.debug(
             "[PADDLE] email resuelto=%s event_id=%s type=%s customer_id=%s",
             email, event_id, event_type, data.get("customer_id"),
         )
@@ -2126,7 +2133,7 @@ async def paddle_webhook(request: Request):
         await db.paddle_events.insert_one(
             {"event_id": event_id, "event_type": event_type, "user_id": user["id"], "processed_at": _now_iso()}
         )
-    logger.info("[PADDLE] procesado event_id=%s type=%s user_id=%s", event_id, event_type, user["id"])
+    logger.debug("[PADDLE] procesado event_id=%s type=%s user_id=%s", event_id, event_type, user["id"])
     return {"ok": True}
 
 

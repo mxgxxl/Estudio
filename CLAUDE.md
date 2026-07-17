@@ -9,7 +9,7 @@
 **Objetivo actual:** convertirla en un **SaaS de oposiciones freemium**:
 - Cuentas de usuario (registro / login).
 - Plan gratis con **límites de uso** (sobre todo de generación con IA) y plan(es) de pago.
-- **Suscripción** con pasarela de pagos (Stripe).
+- **Suscripción** con pasarela de pagos (Paddle, Billing v4).
 - Aislamiento total de datos por usuario (multiusuario real).
 
 ## Stack
@@ -21,9 +21,10 @@
 | IA | Google Gemini vía `google-genai` SDK (modelo por defecto `gemini-2.5-flash`) |
 | Frontend | React 19 + react-router-dom + Tailwind + shadcn/Radix UI + axios |
 | PDF | `pypdf` para extracción de texto |
+| Pagos | Paddle (Billing v4) vía Paddle.js (frontend) + webhooks firmados (backend) |
 | Despliegue | `Procfile` (uvicorn); frontend CRA + craco |
 
-Dependencias **ya instaladas pero aún sin usar** (preparadas para el SaaS): `bcrypt`, `PyJWT`, `python-jose`, `passlib`, `stripe`.
+Dependencias de auth ya en uso: `bcrypt`, `PyJWT`, `python-jose`, `passlib`. La integración de pagos con **Paddle** no usa SDK de servidor: el checkout va con **Paddle.js** en el frontend y el backend recibe **webhooks** (verificación de firma HMAC-SHA256 propia) y consulta la **API REST de Paddle** con `httpx`.
 
 ## Estructura
 
@@ -49,9 +50,11 @@ test_reports/          # resultados pytest por iteración
 Las preguntas soportan `question_type` = `mcq` | `tf` | `dev`, penalización configurable y campos SRS (SM-2 simplificado).
 
 ### Variables de entorno
-- Backend: `MONGO_URL`, `DB_NAME`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CORS_ORIGINS`.
-- Frontend: `REACT_APP_BACKEND_URL`.
-- Pendientes para el SaaS: `JWT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, etc.
+- Backend (base): `MONGO_URL`, `DB_NAME`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CORS_ORIGINS`, `LOG_LEVEL` (por defecto `INFO`; súbelo a `DEBUG` para ver las trazas rutinarias, p. ej. las de Paddle).
+- Backend (auth): `JWT_SECRET`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
+- Backend (límites IA): `FREE_AI_GENERATIONS_PER_MONTH`, `PREMIUM_AI_GENERATIONS_PER_MONTH`.
+- Backend (pagos Paddle): `PADDLE_ENV` (`sandbox`|`production`), `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_PREMIUM_PRICE_ID`.
+- Frontend: `REACT_APP_BACKEND_URL`, `REACT_APP_PADDLE_CLIENT_TOKEN`, `REACT_APP_PADDLE_ENV`, `REACT_APP_PADDLE_PREMIUM_PRICE_ID`.
 
 ## Endpoints
 
@@ -70,7 +73,7 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 1. **Autenticación**: no hay registro/login/JWT. Las libs están instaladas pero `server.py` no las usa.
 2. **Multiusuario**: ninguna colección tiene `user_id`; todas las consultas son globales. **Hoy todos los datos son compartidos.**
 3. **Límites de IA**: no se comprueba ningún plan ni cuota antes de llamar a Gemini.
-4. **Pagos**: `stripe` está en deps pero no hay integración, ni planes, ni webhooks.
+4. **Pagos**: integrados con **Paddle (Billing v4)** — checkout con Paddle.js y webhook firmado en `/api/webhooks/paddle` que activa/desactiva el plan premium.
 5. **Frontend**: no hay pantallas de auth, ni de plan/suscripción, ni gating por límites.
 
 ## Reglas obligatorias
