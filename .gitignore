@@ -115,3 +115,7 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Excepcion: las plantillas .env.example SI se versionan (no contienen secretos).
+!.env.example
+!*/.env.example
