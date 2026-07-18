@@ -2046,12 +2046,6 @@ async def billing_checkout(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=409, detail="Ya tienes una suscripción Premium activa")
     if not PADDLE_PREMIUM_PRICE_ID:
         raise HTTPException(status_code=500, detail="PADDLE_PREMIUM_PRICE_ID no configurado en el servidor")
-    # DIAG-TEMP: confirmar que el checkout devuelve user_id al frontend. QUITAR
-    # tras verificar el emparejamiento por custom_data.
-    logger.info(
-        "[PADDLE][DIAG-TEMP] /billing/checkout devuelve user_id=%s email=%s",
-        current_user["id"], current_user["email"],
-    )
     return {
         "price_id": PADDLE_PREMIUM_PRICE_ID,
         "client_token_env": PADDLE_ENV,
@@ -2109,15 +2103,6 @@ async def paddle_webhook(request: Request):
     logger.debug(
         "[PADDLE] webhook firmado OK event_id=%s type=%s customer_id=%s subscription_id=%s",
         event_id, event_type, data.get("customer_id"), data.get("id") or data.get("subscription_id"),
-    )
-
-    # DIAG-TEMP: ¿Paddle propaga custom_data a CADA tipo de evento (sobre todo a
-    # subscription.activated)? Logueamos presencia y contenido para verificarlo con
-    # un pago sandbox real en Railway. QUITAR este bloque tras la verificación.
-    _cd = data.get("custom_data")
-    logger.info(
-        "[PADDLE][DIAG-TEMP] event_type=%s custom_data_present=%s custom_data=%r",
-        event_type, _cd is not None, _cd,
     )
 
     # Idempotencia: si ya procesamos este event_id, no repetimos.

@@ -52,16 +52,12 @@ export function initPaddle() {
 // firmado en el propio evento) sin depender de la resolución por email.
 export async function openPremiumCheckout({ priceId, email, userId }) {
     const Paddle = await initPaddle();
-    const options = {
+    Paddle.Checkout.open({
         items: [{ priceId, quantity: 1 }],
         ...(email ? { customer: { email } } : {}),
         ...(userId ? { customData: { user_id: userId } } : {}),
         settings: { displayMode: "overlay", theme: "light", locale: "es" },
-    };
-    // DIAG-TEMP: ver qué se pasa realmente a Paddle. Si userId llega undefined,
-    // customData se OMITE en silencio (no aparecerá en options). Quitar tras verificar.
-    console.log("[Paddle][DIAG-TEMP] userId=", userId, "→ checkout options:", options);
-    Paddle.Checkout.open(options);
+    });
 }
 
 // Flujo completo: pide datos al backend (valida plan/precio) y abre el overlay.
