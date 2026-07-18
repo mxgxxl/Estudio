@@ -2105,6 +2105,15 @@ async def paddle_webhook(request: Request):
         event_id, event_type, data.get("customer_id"), data.get("id") or data.get("subscription_id"),
     )
 
+    # DIAG-TEMP: ¿Paddle propaga custom_data a CADA tipo de evento (sobre todo a
+    # subscription.activated)? Logueamos presencia y contenido para verificarlo con
+    # un pago sandbox real en Railway. QUITAR este bloque tras la verificación.
+    _cd = data.get("custom_data")
+    logger.info(
+        "[PADDLE][DIAG-TEMP] event_type=%s custom_data_present=%s custom_data=%r",
+        event_type, _cd is not None, _cd,
+    )
+
     # Idempotencia: si ya procesamos este event_id, no repetimos.
     if event_id and await db.paddle_events.find_one({"event_id": event_id}):
         logger.debug("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
