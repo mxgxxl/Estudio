@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Sparkles, Loader2, CheckCircle2, CreditCard, Settings } from "lucide-react";
+import { Sparkles, Loader2, CheckCircle2, CreditCard, Settings, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { billingStatus, billingPortal } from "@/lib/api";
 import { startPremiumCheckout } from "@/lib/paddle";
@@ -83,6 +83,7 @@ export default function Account() {
     const isPremium = plan === "premium";
     const subStatus = status?.subscription_status || "free";
     const periodEnd = formatDate(status?.current_period_end);
+    const cancelScheduled = Boolean(status?.cancel_scheduled);
 
     return (
         <div className="max-w-3xl mx-auto px-5 md:px-8 py-8">
@@ -127,7 +128,11 @@ export default function Account() {
                         {periodEnd && (
                             <div className="flex justify-between">
                                 <dt style={{ color: "var(--text-muted)" }}>
-                                    {subStatus === "canceled" ? "Acceso hasta" : "Renueva el"}
+                                    {cancelScheduled
+                                        ? "Se cancelará el"
+                                        : subStatus === "canceled"
+                                        ? "Acceso hasta"
+                                        : "Renueva el"}
                                 </dt>
                                 <dd className="font-medium">{periodEnd}</dd>
                             </div>
@@ -157,13 +162,27 @@ export default function Account() {
 
                 {isPremium && (
                     <>
-                        <div
-                            className="mt-5 flex items-center gap-2 text-sm rounded-md p-3"
-                            style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
-                        >
-                            <CheckCircle2 className="w-4 h-4" style={{ color: "var(--sage)" }} />
-                            Tienes acceso completo a las generaciones de IA del plan Premium.
-                        </div>
+                        {cancelScheduled ? (
+                            <div
+                                className="mt-5 flex items-start gap-2 text-sm rounded-md p-3"
+                                style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+                                data-testid="account-cancel-scheduled"
+                            >
+                                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--warning, #C9821B)" }} />
+                                <span>
+                                    <strong>Premium</strong> — se cancelará el {periodEnd || "final del periodo"}.
+                                    Mantienes el acceso hasta esa fecha.
+                                </span>
+                            </div>
+                        ) : (
+                            <div
+                                className="mt-5 flex items-center gap-2 text-sm rounded-md p-3"
+                                style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                            >
+                                <CheckCircle2 className="w-4 h-4" style={{ color: "var(--sage)" }} />
+                                Tienes acceso completo a las generaciones de IA del plan Premium.
+                            </div>
+                        )}
                         <button
                             type="button"
                             onClick={onManage}

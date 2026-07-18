@@ -384,3 +384,64 @@ class TestBillingPortal:
         r = client.post("/api/billing/portal", headers=h)
         assert r.status_code == 502
         assert "portal" in r.json()["detail"].lower()
+
+
+def _sub_event_scheduled(event_id, status, email, scheduled_change,
+                         sub_id="sub_sch_1", cust_id="ctm_sch_1", ends_at="2099-06-01T00:00:00Z"):
+    """subscription.updated con (o sin) scheduled_change. El usuario sigue active."""
+    ev = _sub_event_nested(event_id, "subscription.updated", status, email,
+                           sub_id=sub_id, cust_id=cust_id, ends_at=ends_at)
+    ev["data"]["scheduled_change"] = scheduled_change
+    return ev
+
+
+# --------------------------------------------------------------------------
+# Cancelación programada a fin de periodo (scheduled_change)
+# --------------------------------------------------------------------------
+class TestScheduledCancellation:
+    def test_scheduled_cancel_keeps_premium_and_flags(self, client):
+        assert _register(client, "sched@test.com").status_code == 201
+        # 1) Alta: premium activo, sin cancelación programada.
+        ev1 = _sub_event_nested(
+            "evt_sch_active", "subscription.activated", "active", "sched@test.com",
+            sub_id="sub_sch_1", cust_id="ctm_sch_1", ends_at="2099-06-01T00:00:00Z",
+        )
+        assert _post_webhook(client, ev1).status_code == 200
+        h = _login(client, "sched@test.com")
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium" and st["cancel_scheduled"] is False
+
+        # 2) El usuario cancela a fin de periodo: subscription.updated + scheduled_change.
+        ev2 = _sub_event_scheduled(
+            "evt_sch_cancel", "active", "sched@test.com",
+            {"action": "cancel", "effective_at": "2099-06-01T00:00:00Z", "resume_at": None},
+        )
+        assert _post_webhook(client, ev2).status_code == 200
+        st = client.get("/api/billing/status", headers=h).json()
+        # Sigue premium hasta que expire, pero ya marcado como cancelación programada.
+        assert st["plan"] == "premium"
+        assert st["subscription_status"] == "active"
+        assert st["cancel_scheduled"] is True
+        assert st["current_period_end"] == "2099-06-01T00:00:00Z"
+
+    def test_reactivation_clears_scheduled_flag(self, client):
+        # Si Paddle envía scheduled_change=null (el usuario deshizo la baja), el
+        # flag debe limpiarse. Test autónomo: fija la baja y luego la revierte.
+        assert _register(client, "resume@test.com").status_code == 201
+        set_cancel = _sub_event_scheduled(
+            "evt_resume_set", "active", "resume@test.com",
+            {"action": "cancel", "effective_at": "2099-06-01T00:00:00Z", "resume_at": None},
+            sub_id="sub_resume_1", cust_id="ctm_resume_1",
+        )
+        assert _post_webhook(client, set_cancel).status_code == 200
+        h = _login(client, "resume@test.com")
+        assert client.get("/api/billing/status", headers=h).json()["cancel_scheduled"] is True
+
+        clear_cancel = _sub_event_scheduled(
+            "evt_resume_clear", "active", "resume@test.com", None,
+            sub_id="sub_resume_1", cust_id="ctm_resume_1",
+        )
+        assert _post_webhook(client, clear_cancel).status_code == 200
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium"
+        assert st["cancel_scheduled"] is False

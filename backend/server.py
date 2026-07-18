@@ -881,9 +881,13 @@ async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
         period_end = (data.get("current_billing_period") or {}).get("ends_at")
         if period_end:
             updates["subscription_current_period_end"] = period_end
+        # Cambio programado (cancelación a fin de periodo, etc.). Se guarda SIEMPRE
+        # en eventos subscription.* — incluido None — para reflejar una baja
+        # programada y también LIMPIARLA si el usuario reactiva la suscripción.
+        updates["subscription_scheduled_change"] = data.get("scheduled_change") or None
         logger.debug(
-            "[PADDLE] _apply_paddle_event type=%s status=%s -> plan=%s user_id=%s",
-            event_type, status, updates.get("plan"), user["id"],
+            "[PADDLE] _apply_paddle_event type=%s status=%s -> plan=%s scheduled_change=%s user_id=%s",
+            event_type, status, updates.get("plan"), updates.get("subscription_scheduled_change"), user["id"],
         )
 
     elif event_type == "transaction.completed":
@@ -2004,6 +2008,9 @@ class User(BaseModel):
     paddle_customer_id: Optional[str] = None
     paddle_subscription_id: Optional[str] = None
     subscription_current_period_end: Optional[str] = None
+    # Cambio programado de Paddle (p. ej. cancelación a fin de periodo). Objeto
+    # {action, effective_at, resume_at} o None si no hay ninguno pendiente.
+    subscription_scheduled_change: Optional[dict] = None
     created_at: str = Field(default_factory=_now_iso)
 
 
@@ -2122,11 +2129,16 @@ async def billing_checkout(current_user: dict = Depends(get_current_user)):
 @api.get("/billing/status")
 async def billing_status(current_user: dict = Depends(get_current_user)):
     """Estado de la suscripción del usuario para el panel de cuenta."""
+    sc = current_user.get("subscription_scheduled_change")
+    cancel_scheduled = bool(isinstance(sc, dict) and sc.get("action") == "cancel")
     return {
         "plan": current_user.get("plan", "free"),
         "subscription_status": current_user.get("subscription_status", "free"),
         "current_period_end": current_user.get("subscription_current_period_end"),
         "paddle_subscription_id": current_user.get("paddle_subscription_id"),
+        # True si hay una cancelación programada (baja a fin de periodo). El usuario
+        # sigue premium hasta current_period_end.
+        "cancel_scheduled": cancel_scheduled,
     }
 
 
