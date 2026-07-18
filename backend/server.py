@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
-from passlib.context import CryptContext
+import bcrypt
 import jwt
 from pypdf import PdfReader
 
@@ -64,7 +64,6 @@ PADDLE_API_KEY = os.environ.get("PADDLE_API_KEY", "")
 PADDLE_WEBHOOK_SECRET = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
 PADDLE_PREMIUM_PRICE_ID = os.environ.get("PADDLE_PREMIUM_PRICE_ID", "")
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 app = FastAPI(title="Study App API")
@@ -2033,14 +2032,20 @@ class TokenResp(BaseModel):
     token_type: str = "bearer"
 
 
+# Hashing de contraseñas con la librería `bcrypt` directa (sin passlib, que está
+# sin mantenimiento). Produce/verifica hashes `$2b$12$` estándar, compatibles con
+# los que passlib generó antes, así que NO invalida las contraseñas existentes.
+# bcrypt solo usa los primeros 72 bytes; truncamos explícitamente para replicar el
+# comportamiento previo de passlib y evitar errores con contraseñas muy largas.
 def _hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    pw = password.encode("utf-8")[:72]
+    return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
 
 
 def _verify_password(plain: str, hashed: str) -> bool:
     try:
-        return pwd_context.verify(plain, hashed)
-    except Exception:
+        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
+    except (ValueError, TypeError):
         return False
 
 
