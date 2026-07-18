@@ -226,3 +226,92 @@ class TestCustomerEmailResolution:
         st = client.get("/api/billing/status", headers=h).json()
         assert st["plan"] == "premium"
         assert st["paddle_subscription_id"] == "sub_apionly_1"
+
+
+def _sub_event_custom_data(event_id, event_type, status, user_id,
+                           sub_id="sub_cd_1", cust_id="ctm_cd_1", ends_at="2099-01-01T00:00:00Z"):
+    """Payload SIN email: el emparejamiento debe hacerse por data.custom_data.user_id."""
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "occurred_at": "2026-01-01T00:00:00Z",
+        "data": {
+            "id": sub_id,
+            "status": status,
+            "customer_id": cust_id,
+            "custom_data": {"user_id": user_id},
+            "current_billing_period": {"starts_at": "2026-01-01T00:00:00Z", "ends_at": ends_at},
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# Emparejamiento por custom_data.user_id (núcleo robusto) + reordenación
+# --------------------------------------------------------------------------
+class TestCustomDataMatching:
+    def test_match_by_custom_data_user_id_without_email(self, client, srv, monkeypatch):
+        """El webhook empareja por custom_data.user_id sin email ni llamada a la API."""
+        reg = _register(client, "cd1@test.com")
+        assert reg.status_code == 201
+        user_id = reg.json()["id"]
+
+        # Si el código cayera al fallback de email, esto se llamaría: lo vigilamos.
+        calls = {"n": 0}
+
+        async def _fake_fetch(customer_id):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr(srv, "_fetch_paddle_customer_email", _fake_fetch)
+
+        ev = _sub_event_custom_data("evt_cd_1", "subscription.activated", "active", user_id)
+        r = _post_webhook(client, ev)
+        assert r.status_code == 200, r.text
+        assert calls["n"] == 0  # NO se recurrió a resolver email
+
+        h = _login(client, "cd1@test.com")
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium"
+        assert st["subscription_status"] == "active"
+        assert st["paddle_subscription_id"] == "sub_cd_1"
+
+    def test_invalid_custom_data_user_id_falls_back_to_email(self, client):
+        """Un user_id inexistente en custom_data no debe emparejar; cae al fallback email."""
+        assert _register(client, "cd2@test.com").status_code == 201
+        ev = _sub_event_custom_data(
+            "evt_cd_2", "subscription.activated", "active", "id-inexistente-manipulado",
+            sub_id="sub_cd_2", cust_id="ctm_cd_2",
+        )
+        # Añadimos email real embebido para que el fallback lo encuentre.
+        ev["data"]["customer"] = {"id": "ctm_cd_2", "email": "cd2@test.com"}
+        r = _post_webhook(client, ev)
+        assert r.status_code == 200, r.text
+
+        h = _login(client, "cd2@test.com")
+        st = client.get("/api/billing/status", headers=h).json()
+        assert st["plan"] == "premium"  # emparejó por email, no por el id manipulado
+
+    def test_stored_id_has_priority_over_email(self, client):
+        """Si el customer_id guardado apunta a A, gana A aunque el email sea de B."""
+        assert _register(client, "prioa@test.com").status_code == 201
+        assert _register(client, "priob@test.com").status_code == 201
+
+        # 1er evento: empareja A por email y guarda paddle_customer_id=ctm_prio_A.
+        ev1 = _sub_event_nested(
+            "evt_prio_1", "subscription.activated", "active", "prioa@test.com",
+            sub_id="sub_prio_A", cust_id="ctm_prio_A",
+        )
+        assert _post_webhook(client, ev1).status_code == 200
+
+        # 2º evento: customer_id=ctm_prio_A (guardado en A) pero email de B.
+        # Con la reordenación, el customer_id debe ganar -> afecta a A, no a B.
+        ev2 = _sub_event_nested(
+            "evt_prio_2", "subscription.updated", "active", "priob@test.com",
+            sub_id="sub_prio_A", cust_id="ctm_prio_A",
+        )
+        assert _post_webhook(client, ev2).status_code == 200
+
+        hb = _login(client, "priob@test.com")
+        assert client.get("/api/billing/status", headers=hb).json()["plan"] == "free"
+        ha = _login(client, "prioa@test.com")
+        assert client.get("/api/billing/status", headers=ha).json()["plan"] == "premium"

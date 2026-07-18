@@ -48,11 +48,14 @@ export function initPaddle() {
 }
 
 // Abre el Paddle Overlay Checkout para el plan Premium.
-export async function openPremiumCheckout({ priceId, email }) {
+// Inyecta customData.user_id para que el webhook empareje por ID propio (viaja
+// firmado en el propio evento) sin depender de la resolución por email.
+export async function openPremiumCheckout({ priceId, email, userId }) {
     const Paddle = await initPaddle();
     Paddle.Checkout.open({
         items: [{ priceId, quantity: 1 }],
         ...(email ? { customer: { email } } : {}),
+        ...(userId ? { customData: { user_id: userId } } : {}),
         settings: { displayMode: "overlay", theme: "light", locale: "es" },
     });
 }
@@ -62,5 +65,9 @@ export async function openPremiumCheckout({ priceId, email }) {
 export async function startPremiumCheckout(fallbackEmail) {
     const data = await billingCheckout();
     const priceId = process.env.REACT_APP_PADDLE_PREMIUM_PRICE_ID || data.price_id;
-    await openPremiumCheckout({ priceId, email: data.customer_email || fallbackEmail });
+    await openPremiumCheckout({
+        priceId,
+        email: data.customer_email || fallbackEmail,
+        userId: data.user_id,
+    });
 }

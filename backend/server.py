@@ -722,6 +722,23 @@ def _extract_customer_email(data: dict) -> Optional[str]:
     return None
 
 
+def _extract_custom_user_id(data: dict) -> Optional[str]:
+    """Extrae el user_id que inyectamos en custom_data del checkout.
+
+    Devuelve un string no vacío o None. NO confía en el valor: la existencia real
+    del usuario en `users` se verifica aparte con un find_one. El webhook ya validó
+    la firma de Paddle antes de llegar aquí, pero validamos el campo igualmente."""
+    if not isinstance(data, dict):
+        return None
+    custom = data.get("custom_data")
+    if not isinstance(custom, dict):
+        return None
+    uid = custom.get("user_id")
+    if isinstance(uid, str) and uid.strip():
+        return uid.strip()
+    return None
+
+
 # Caché en memoria customer_id -> email para no llamar a la API de Paddle en cada evento.
 _paddle_customer_email_cache: dict = {}
 
@@ -2033,6 +2050,9 @@ async def billing_checkout(current_user: dict = Depends(get_current_user)):
         "price_id": PADDLE_PREMIUM_PRICE_ID,
         "client_token_env": PADDLE_ENV,
         "customer_email": current_user["email"],
+        # user_id para inyectarlo como custom_data en el checkout y poder emparejar
+        # el webhook por ID propio (sin depender de la resolución por email).
+        "user_id": current_user["id"],
     }
 
 
@@ -2090,35 +2110,62 @@ async def paddle_webhook(request: Request):
         logger.debug("[PADDLE] evento duplicado ignorado event_id=%s type=%s", event_id, event_type)
         return {"ok": True, "duplicate": True}
 
-    # Resolver el email del cliente (payload o, si falta, vía API por customer_id).
-    email = await _resolve_customer_email(data)
-    if email:
-        logger.debug(
-            "[PADDLE] email resuelto=%s event_id=%s type=%s customer_id=%s",
-            email, event_id, event_type, data.get("customer_id"),
-        )
-    else:
-        logger.warning(
-            "[PADDLE] no se pudo resolver email event_id=%s type=%s customer_id=%s",
-            event_id, event_type, data.get("customer_id"),
-        )
-
-    # Localizar al usuario: por email y, si no, por ids ya conocidos.
+    # Localizar al usuario. Prioridad: IDs propios/guardados (fiables y sin llamada
+    # externa) y, SOLO si todos fallan, el email como fallback (que puede requerir
+    # la API de Paddle). Así el emparejamiento no depende de la resolución por email.
     user = None
-    if email:
-        user = await db.users.find_one({"email": email.lower().strip()})
+    matched_by = None
+
+    # 1) custom_data.user_id que inyectamos nosotros en el checkout. Es el método
+    #    más robusto: viaja dentro del propio evento (ya firmado por Paddle).
+    #    Se valida que sea string no vacío y que EXISTA en users.
+    cd_user_id = _extract_custom_user_id(data)
+    if cd_user_id:
+        user = await db.users.find_one({"id": cd_user_id})
+        if user is not None:
+            matched_by = "custom_data.user_id"
+        else:
+            logger.warning(
+                "[PADDLE] custom_data.user_id=%s no existe en users event_id=%s type=%s",
+                cd_user_id, event_id, event_type,
+            )
+
+    # 2) subscription_id ya guardado en un usuario.
     if user is None and data.get("id"):
         user = await db.users.find_one({"paddle_subscription_id": data["id"]})
+        if user is not None:
+            matched_by = "paddle_subscription_id(data.id)"
     if user is None and data.get("subscription_id"):
         user = await db.users.find_one({"paddle_subscription_id": data["subscription_id"]})
+        if user is not None:
+            matched_by = "paddle_subscription_id(data.subscription_id)"
+
+    # 3) customer_id ya guardado en un usuario.
     if user is None and data.get("customer_id"):
         user = await db.users.find_one({"paddle_customer_id": data["customer_id"]})
+        if user is not None:
+            matched_by = "paddle_customer_id"
+
+    # 4) Fallback final: email. Solo se resuelve (posible llamada a la API de
+    #    Paddle) si los IDs anteriores no emparejaron.
+    email = None
+    if user is None:
+        email = await _resolve_customer_email(data)
+        if email:
+            user = await db.users.find_one({"email": email.lower().strip()})
+            if user is not None:
+                matched_by = "email"
+        else:
+            logger.warning(
+                "[PADDLE] no se pudo resolver email (fallback) event_id=%s type=%s customer_id=%s",
+                event_id, event_type, data.get("customer_id"),
+            )
 
     if user is None:
         logger.warning(
-            "[PADDLE] usuario no encontrado event_id=%s type=%s email=%s "
+            "[PADDLE] usuario no encontrado event_id=%s type=%s email=%s custom_data.user_id=%s "
             "intentos_ids: sub_id(data.id)=%s subscription_id=%s customer_id=%s",
-            event_id, event_type, email,
+            event_id, event_type, email, cd_user_id,
             data.get("id"), data.get("subscription_id"), data.get("customer_id"),
         )
         if event_id:
@@ -2126,6 +2173,11 @@ async def paddle_webhook(request: Request):
                 {"event_id": event_id, "event_type": event_type, "user_id": None, "processed_at": _now_iso()}
             )
         return {"ok": True, "user_found": False}
+
+    logger.debug(
+        "[PADDLE] usuario emparejado por=%s user_id=%s event_id=%s type=%s",
+        matched_by, user["id"], event_id, event_type,
+    )
 
     await _apply_paddle_event(user, event_type, data)
 
