@@ -315,3 +315,72 @@ class TestCustomDataMatching:
         assert client.get("/api/billing/status", headers=hb).json()["plan"] == "free"
         ha = _login(client, "prioa@test.com")
         assert client.get("/api/billing/status", headers=ha).json()["plan"] == "premium"
+
+
+# --------------------------------------------------------------------------
+# Customer portal (gestión/cancelación de la suscripción)
+# --------------------------------------------------------------------------
+class TestBillingPortal:
+    def test_portal_requires_login(self, client):
+        assert client.post("/api/billing/portal").status_code == 401
+
+    def test_portal_no_customer_id_returns_409(self, client):
+        # Usuario sin paddle_customer_id -> error claro (409), no 500.
+        assert _register(client, "portalfree@test.com").status_code == 201
+        h = _login(client, "portalfree@test.com")
+        r = client.post("/api/billing/portal", headers=h)
+        assert r.status_code == 409
+        assert r.json()["detail"]  # mensaje logueable y mostrable
+
+    def test_portal_success_returns_cancel_deep_link(self, client, srv, monkeypatch):
+        assert _register(client, "portalok@test.com").status_code == 201
+        # Un webhook de suscripción activa guarda paddle_customer_id y subscription_id.
+        ev = _sub_event(
+            "evt_portal_ok", "subscription.activated", "active", "portalok@test.com",
+            sub_id="sub_portal_ok", cust_id="ctm_portal_ok",
+        )
+        assert _post_webhook(client, ev).status_code == 200
+
+        captured = {}
+
+        async def _fake_portal(customer_id, subscription_id):
+            captured["customer_id"] = customer_id
+            captured["subscription_id"] = subscription_id
+            return {
+                "urls": {
+                    "general": {"overview": "https://portal.paddle.com/overview"},
+                    "subscriptions": [
+                        {"id": subscription_id, "cancel_subscription": "https://portal.paddle.com/cancel"}
+                    ],
+                }
+            }
+
+        monkeypatch.setattr(srv, "_create_paddle_portal_session", _fake_portal)
+
+        h = _login(client, "portalok@test.com")
+        r = client.post("/api/billing/portal", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["portal_url"] == "https://portal.paddle.com/cancel"
+        # Se usaron el customer_id y subscription_id guardados del usuario.
+        assert captured["customer_id"] == "ctm_portal_ok"
+        assert captured["subscription_id"] == "sub_portal_ok"
+
+    def test_portal_paddle_api_failure_returns_502(self, client, srv, monkeypatch):
+        assert _register(client, "portalfail@test.com").status_code == 201
+        ev = _sub_event(
+            "evt_portal_fail", "subscription.activated", "active", "portalfail@test.com",
+            sub_id="sub_portal_fail", cust_id="ctm_portal_fail",
+        )
+        assert _post_webhook(client, ev).status_code == 200
+
+        async def _boom(customer_id, subscription_id):
+            raise srv.HTTPException(
+                status_code=502, detail="No se pudo abrir el portal de gestión (permisos de Paddle)"
+            )
+
+        monkeypatch.setattr(srv, "_create_paddle_portal_session", _boom)
+
+        h = _login(client, "portalfail@test.com")
+        r = client.post("/api/billing/portal", headers=h)
+        assert r.status_code == 502
+        assert "portal" in r.json()["detail"].lower()

@@ -67,6 +67,7 @@ export const getUsage = () => api.get("/usage/me").then((r) => r.data);
 // Billing (Paddle)
 export const billingCheckout = () => api.post("/billing/checkout").then((r) => r.data);
 export const billingStatus = () => api.get("/billing/status").then((r) => r.data);
+export const billingPortal = () => api.post("/billing/portal").then((r) => r.data);
 
 // Subjects
 export const listSubjects = () => api.get("/subjects").then((r) => r.data);

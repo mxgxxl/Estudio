@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Sparkles, Loader2, CheckCircle2, CreditCard } from "lucide-react";
+import { Sparkles, Loader2, CheckCircle2, CreditCard, Settings } from "lucide-react";
 import { toast } from "sonner";
-import { billingStatus } from "@/lib/api";
+import { billingStatus, billingPortal } from "@/lib/api";
 import { startPremiumCheckout } from "@/lib/paddle";
 import { useAuth } from "@/context/AuthContext";
 
@@ -25,6 +25,7 @@ export default function Account() {
     const [status, setStatus] = useState(null);
     const [loading, setLoading] = useState(true);
     const [checkingOut, setCheckingOut] = useState(false);
+    const [openingPortal, setOpeningPortal] = useState(false);
 
     const refresh = useCallback(() => {
         return billingStatus()
@@ -60,6 +61,21 @@ export default function Account() {
             }
         } finally {
             setCheckingOut(false);
+        }
+    };
+
+    const onManage = async () => {
+        setOpeningPortal(true);
+        try {
+            const { portal_url } = await billingPortal();
+            if (portal_url) {
+                window.location.href = portal_url;
+            } else {
+                toast.error("No se pudo abrir el portal de gestión");
+            }
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "No se pudo abrir el portal de gestión");
+            setOpeningPortal(false);
         }
     };
 
@@ -140,13 +156,26 @@ export default function Account() {
                 )}
 
                 {isPremium && (
-                    <div
-                        className="mt-5 flex items-center gap-2 text-sm rounded-md p-3"
-                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
-                    >
-                        <CheckCircle2 className="w-4 h-4" style={{ color: "var(--sage)" }} />
-                        Tienes acceso completo a las generaciones de IA del plan Premium.
-                    </div>
+                    <>
+                        <div
+                            className="mt-5 flex items-center gap-2 text-sm rounded-md p-3"
+                            style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                        >
+                            <CheckCircle2 className="w-4 h-4" style={{ color: "var(--sage)" }} />
+                            Tienes acceso completo a las generaciones de IA del plan Premium.
+                        </div>
+                        <button
+                            type="button"
+                            onClick={onManage}
+                            disabled={openingPortal}
+                            data-testid="account-manage-subscription"
+                            className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-all disabled:opacity-60"
+                            style={{ border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                        >
+                            {openingPortal ? <Loader2 className="w-4 h-4 animate-spin" /> : <Settings className="w-4 h-4" />}
+                            Gestionar suscripción
+                        </button>
+                    </>
                 )}
             </div>
         </div>

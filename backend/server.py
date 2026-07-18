@@ -802,6 +802,69 @@ async def _resolve_customer_email(data: dict) -> Optional[str]:
     return None
 
 
+async def _create_paddle_portal_session(customer_id: str, subscription_id: Optional[str]) -> dict:
+    """Crea una sesión de customer portal en Paddle y devuelve el objeto `data`.
+
+    La sesión se genera bajo demanda y NUNCA se cachea (son de un solo uso). Lanza
+    HTTPException con un detalle claro y logueable (nunca un 500 opaco) si la API
+    de Paddle no está configurada, falla, o rechaza por permisos (403)."""
+    if not PADDLE_API_KEY:
+        logger.warning("[PADDLE] portal-sessions: PADDLE_API_KEY no configurada")
+        raise HTTPException(status_code=502, detail="La integración de pagos no está configurada en el servidor")
+    url = f"{_paddle_api_base()}/customers/{customer_id}/portal-sessions"
+    body: dict = {"subscription_ids": [subscription_id]} if subscription_id else {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(url, headers={"Authorization": f"Bearer {PADDLE_API_KEY}"}, json=body)
+    except Exception as e:
+        logger.warning("[PADDLE] portal-sessions error de red customer=%s: %s", customer_id, e)
+        raise HTTPException(status_code=502, detail="No se pudo contactar con Paddle. Inténtalo de nuevo.") from e
+
+    if resp.status_code == 403:
+        logger.warning(
+            "[PADDLE] portal-sessions 403 (¿falta el permiso 'Customer portal sessions (Write)' en la API key?) "
+            "customer=%s body=%s", customer_id, resp.text[:300],
+        )
+        raise HTTPException(status_code=502, detail="No se pudo abrir el portal de gestión (permisos de Paddle)")
+    if resp.status_code not in (200, 201):
+        logger.warning(
+            "[PADDLE] portal-sessions HTTP %s customer=%s body=%s", resp.status_code, customer_id, resp.text[:300]
+        )
+        raise HTTPException(status_code=502, detail="No se pudo abrir el portal de gestión de la suscripción")
+    try:
+        return resp.json().get("data") or {}
+    except Exception as e:
+        logger.warning("[PADDLE] portal-sessions respuesta no-JSON customer=%s: %s", customer_id, e)
+        raise HTTPException(status_code=502, detail="Respuesta inesperada de Paddle") from e
+
+
+def _extract_portal_url(portal_data: dict, subscription_id: Optional[str]) -> Optional[str]:
+    """Del objeto `data` de portal-sessions, extrae el deep link para CANCELAR la
+    suscripción; si no lo hay, cae al overview general del portal."""
+    urls = portal_data.get("urls") if isinstance(portal_data, dict) else None
+    if not isinstance(urls, dict):
+        return None
+    # Deep link por suscripción (cancelar). Preferimos la del subscription_id del
+    # usuario; si no coincide, la primera que traiga cancel_subscription.
+    subs = urls.get("subscriptions")
+    if isinstance(subs, list):
+        chosen = None
+        for s in subs:
+            if not isinstance(s, dict) or not s.get("cancel_subscription"):
+                continue
+            if subscription_id and s.get("id") == subscription_id:
+                return s["cancel_subscription"]
+            if chosen is None:
+                chosen = s["cancel_subscription"]
+        if chosen:
+            return chosen
+    # Fallback: overview general del portal.
+    general = urls.get("general")
+    if isinstance(general, dict) and general.get("overview"):
+        return general["overview"]
+    return None
+
+
 async def _apply_paddle_event(user: dict, event_type: str, data: dict) -> None:
     """Aplica el efecto de un evento de Paddle al documento del usuario."""
     updates: dict = {}
@@ -2065,6 +2128,31 @@ async def billing_status(current_user: dict = Depends(get_current_user)):
         "current_period_end": current_user.get("subscription_current_period_end"),
         "paddle_subscription_id": current_user.get("paddle_subscription_id"),
     }
+
+
+@api.post("/billing/portal")
+async def billing_portal(current_user: dict = Depends(get_current_user)):
+    """Genera un enlace autenticado al customer portal de Paddle para que el usuario
+    gestione/cancele su suscripción. Devuelve el deep link de cancelar (o el overview
+    general si no hay suscripción). La sesión se crea bajo demanda y no se cachea.
+
+    La cancelación en sí la resuelve Paddle; nuestro webhook (subscription.canceled)
+    ya sincroniza el plan a 'free' cuando corresponde."""
+    customer_id = current_user.get("paddle_customer_id")
+    if not customer_id:
+        logger.warning("[PADDLE] portal: usuario %s sin paddle_customer_id", current_user["id"])
+        raise HTTPException(
+            status_code=409,
+            detail="Aún no hay una suscripción de Paddle asociada a tu cuenta.",
+        )
+    subscription_id = current_user.get("paddle_subscription_id")
+    portal_data = await _create_paddle_portal_session(customer_id, subscription_id)
+    url = _extract_portal_url(portal_data, subscription_id)
+    if not url:
+        logger.warning("[PADDLE] portal: respuesta sin URLs utilizables customer=%s", customer_id)
+        raise HTTPException(status_code=502, detail="No se pudo obtener el enlace del portal de gestión")
+    logger.debug("[PADDLE] portal-session creada user_id=%s customer=%s", current_user["id"], customer_id)
+    return {"portal_url": url}
 
 
 @api.post("/webhooks/paddle")
