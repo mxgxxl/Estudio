@@ -2046,6 +2046,12 @@ async def billing_checkout(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=409, detail="Ya tienes una suscripción Premium activa")
     if not PADDLE_PREMIUM_PRICE_ID:
         raise HTTPException(status_code=500, detail="PADDLE_PREMIUM_PRICE_ID no configurado en el servidor")
+    # DIAG-TEMP: confirmar que el checkout devuelve user_id al frontend. QUITAR
+    # tras verificar el emparejamiento por custom_data.
+    logger.info(
+        "[PADDLE][DIAG-TEMP] /billing/checkout devuelve user_id=%s email=%s",
+        current_user["id"], current_user["email"],
+    )
     return {
         "price_id": PADDLE_PREMIUM_PRICE_ID,
         "client_token_env": PADDLE_ENV,
