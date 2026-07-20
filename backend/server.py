@@ -116,10 +116,27 @@ class Topic(BaseModel):
 class PdfSource(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
+    # topic_id se mantiene por compatibilidad/rollback en la Fase 1 (el backend nuevo
+    # NO lo lee: la relación PDF<->tema vive en la colección pdf_links). Se eliminará
+    # en una fase posterior cuando ya no haga falta.
     topic_id: str
     filename: str
     text: str
     char_count: int = 0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class PdfLink(BaseModel):
+    """Asociación muchos-a-muchos entre un PDF y un tema (colección intermedia).
+
+    Un PDF (pdfs) puede estar vinculado a varios temas/asignaturas mediante varias
+    filas PdfLink. subject_id se desnormaliza (copiado del topic) para poder filtrar
+    por asignatura sin joins."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    pdf_id: str
+    topic_id: str
+    subject_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -2341,6 +2358,14 @@ async def ensure_indices():
         await db.pdfs.create_index("topic_id")
         await db.pdfs.create_index([("user_id", 1), ("id", 1)])
         await db.pdfs.create_index([("user_id", 1), ("topic_id", 1)])
+        # PDF links (relación muchos-a-muchos PDF<->tema)
+        await db.pdf_links.create_index("id", unique=True)
+        await db.pdf_links.create_index([("user_id", 1), ("topic_id", 1)])
+        await db.pdf_links.create_index([("user_id", 1), ("pdf_id", 1)])
+        # Único: evita duplicar la misma asociación y da idempotencia a la migración.
+        await db.pdf_links.create_index(
+            [("user_id", 1), ("pdf_id", 1), ("topic_id", 1)], unique=True
+        )
         # Questions
         await db.questions.create_index("id", unique=True)
         await db.questions.create_index("topic_id")
