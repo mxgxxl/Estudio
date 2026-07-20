@@ -262,3 +262,137 @@ class TestDeleteIsolation:
         assert _pdf_exists(srv, uid_b, pb)
         assert _links_count(srv, uid_b, pb) == 1
         assert pb in _topic_pdf_ids(client, hb, tb)
+
+
+# --------------------------------------------------------------------------
+# Fase 2: endpoints link / unlink / GET /pdfs + link_count
+# --------------------------------------------------------------------------
+def _list_pdfs(client, h):
+    r = client.get("/api/pdfs", headers=h)
+    assert r.status_code == 200, r.text
+    return {p["id"]: p for p in r.json()}
+
+
+class TestLinkUnlinkEndpoints:
+    def test_link_existing_pdf_to_second_topic(self, client, srv):
+        uid = _register(client, "lk1@t.com")
+        h = _login(client, "lk1@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, p2 = _upload_topic(client, h, s, "T2")
+
+        r = client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["link_count"] == 2
+        # p1 ahora se ve en ambos temas; p2 sigue solo en t2.
+        assert _topic_pdf_ids(client, h, t2) == {p1, p2}
+        assert _topic_pdf_ids(client, h, t1) == {p1}
+
+    def test_link_is_idempotent(self, client, srv):
+        uid = _register(client, "lk2@t.com")
+        h = _login(client, "lk2@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, _ = _upload_topic(client, h, s, "T2")
+        assert client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h).status_code == 200
+        r = client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h)
+        assert r.status_code == 200
+        assert _links_count(srv, uid, p1) == 2  # sin duplicar
+
+    def test_link_404_topic_or_pdf_or_cross_user(self, client, srv):
+        _register(client, "lk-a@t.com"); ha = _login(client, "lk-a@t.com")
+        _register(client, "lk-b@t.com"); hb = _login(client, "lk-b@t.com")
+        sa = _subject(client, ha, "SA"); ta, pa = _upload_topic(client, ha, sa, "TA")
+        sb = _subject(client, hb, "SB"); tb, pb = _upload_topic(client, hb, sb, "TB")
+
+        # B intenta vincular el PDF de A a un tema de B -> PDF no encontrado.
+        assert client.post(f"/api/topics/{tb}/pdfs/{pa}/link", headers=hb).status_code == 404
+        # B intenta vincular su PDF a un tema de A -> tema no encontrado.
+        assert client.post(f"/api/topics/{ta}/pdfs/{pb}/link", headers=hb).status_code == 404
+        # Tema/PDF inexistentes.
+        assert client.post(f"/api/topics/nope/pdfs/{pb}/link", headers=hb).status_code == 404
+        assert client.post(f"/api/topics/{tb}/pdfs/nope/link", headers=hb).status_code == 404
+
+    def test_unlink_keeps_pdf_when_in_other_topics(self, client, srv):
+        uid = _register(client, "ul1@t.com")
+        h = _login(client, "ul1@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, _ = _upload_topic(client, h, s, "T2")
+        assert client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h).status_code == 200
+
+        r = client.delete(f"/api/topics/{t1}/pdfs/{p1}", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "pdf_deleted": False}
+        assert _pdf_exists(srv, uid, p1)                 # sigue por t2
+        assert p1 not in _topic_pdf_ids(client, h, t1)   # ya no en t1
+        assert p1 in _topic_pdf_ids(client, h, t2)
+
+    def test_unlink_last_topic_deletes_pdf_and_unlinks_questions(self, client, srv):
+        uid = _register(client, "ul2@t.com")
+        h = _login(client, "ul2@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        # Tiene preguntas generadas (pdf_source_id = p1).
+        assert asyncio.run(srv.db.questions.count_documents(
+            {"user_id": uid, "pdf_source_id": p1})) > 0
+
+        r = client.delete(f"/api/topics/{t1}/pdfs/{p1}", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["pdf_deleted"] is True
+        assert not _pdf_exists(srv, uid, p1)             # huérfano -> borrado
+        # Las preguntas se conservan pero sin referencia al PDF.
+        assert asyncio.run(srv.db.questions.count_documents(
+            {"user_id": uid, "pdf_source_id": p1})) == 0
+        assert asyncio.run(srv.db.questions.count_documents(
+            {"user_id": uid, "topic_id": t1})) > 0
+
+    def test_unlink_404_when_pdf_not_in_topic(self, client, srv):
+        uid = _register(client, "ul3@t.com")
+        h = _login(client, "ul3@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, p2 = _upload_topic(client, h, s, "T2")
+        # p2 no está en t1.
+        assert client.delete(f"/api/topics/{t1}/pdfs/{p2}", headers=h).status_code == 404
+
+    def test_unlink_isolation(self, client, srv):
+        _register(client, "ul-a@t.com"); ha = _login(client, "ul-a@t.com")
+        uid_b = _register(client, "ul-b@t.com"); hb = _login(client, "ul-b@t.com")
+        sb = _subject(client, hb, "SB"); tb, pb = _upload_topic(client, hb, sb, "TB")
+        # A intenta desvincular un PDF de un tema de B -> tema no encontrado.
+        assert client.delete(f"/api/topics/{tb}/pdfs/{pb}", headers=ha).status_code == 404
+        assert _pdf_exists(srv, uid_b, pb)
+
+    def test_list_topic_pdfs_includes_link_count(self, client, srv):
+        uid = _register(client, "lc1@t.com")
+        h = _login(client, "lc1@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, _ = _upload_topic(client, h, s, "T2")
+        client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h)
+        row = next(p for p in client.get(f"/api/topics/{t1}/pdfs", headers=h).json() if p["id"] == p1)
+        assert row["link_count"] == 2
+
+    def test_library_lists_all_pdfs_with_link_count(self, client, srv):
+        uid = _register(client, "lib1@t.com")
+        h = _login(client, "lib1@t.com")
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+        t2, p2 = _upload_topic(client, h, s, "T2")
+        client.post(f"/api/topics/{t2}/pdfs/{p1}/link", headers=h)  # p1 en t1 y t2
+
+        lib = _list_pdfs(client, h)
+        assert set(lib.keys()) == {p1, p2}
+        assert lib[p1]["link_count"] == 2
+        assert set(lib[p1]["topic_ids"]) == {t1, t2}
+        assert lib[p2]["link_count"] == 1
+        assert "text" not in lib[p1]  # no se expone el texto
+
+    def test_library_isolated_per_user(self, client, srv):
+        _register(client, "lib-a@t.com"); ha = _login(client, "lib-a@t.com")
+        _register(client, "lib-b@t.com"); hb = _login(client, "lib-b@t.com")
+        sa = _subject(client, ha, "SA"); _t, pa = _upload_topic(client, ha, sa, "TA")
+        sb = _subject(client, hb, "SB"); _t2, pb = _upload_topic(client, hb, sb, "TB")
+        assert set(_list_pdfs(client, ha).keys()) == {pa}
+        assert set(_list_pdfs(client, hb).keys()) == {pb}

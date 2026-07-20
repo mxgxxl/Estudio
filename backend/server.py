@@ -1295,6 +1295,28 @@ async def list_topic_pdfs(topic_id: str, current_user: dict = Depends(get_curren
     ).sort("created_at", 1).to_list(100)
     for p in pdfs:
         p["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": p["id"]})
+        # link_count: en cuántos temas está este PDF (para el aviso de borrado en la UI).
+        p["link_count"] = await db.pdf_links.count_documents({"user_id": uid, "pdf_id": p["id"]})
+    return pdfs
+
+
+@api.get("/pdfs")
+async def list_all_pdfs(current_user: dict = Depends(get_current_user)):
+    """Biblioteca de PDFs del usuario: todos sus PDFs (sin texto), cada uno con
+    link_count (en cuántos temas está) y topic_ids. Alimenta el selector
+    'De mi biblioteca' del diálogo de añadir PDF (Fase 2). No es una pantalla."""
+    uid = current_user["id"]
+    pdfs = await db.pdfs.find({"user_id": uid}, {"_id": 0, "text": 0}).sort("created_at", 1).to_list(2000)
+    # Un solo find de vínculos y agrupamos en memoria (evita N consultas).
+    links = await db.pdf_links.find({"user_id": uid}, {"_id": 0, "pdf_id": 1, "topic_id": 1}).to_list(10000)
+    topics_by_pdf: dict = {}
+    for l in links:
+        topics_by_pdf.setdefault(l["pdf_id"], []).append(l["topic_id"])
+    for p in pdfs:
+        tids = topics_by_pdf.get(p["id"], [])
+        p["topic_ids"] = tids
+        p["link_count"] = len(tids)
+        p["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": p["id"]})
     return pdfs
 
 
@@ -1396,7 +1418,56 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_
         "char_count": pdf_source.char_count,
         "created_at": pdf_source.created_at,
         "question_count": 0,
+        "link_count": 1,
     }
+
+
+@api.post("/topics/{topic_id}/pdfs/{pdf_id}/link")
+async def link_existing_pdf(topic_id: str, pdf_id: str, current_user: dict = Depends(get_current_user)):
+    """Asocia un PDF ya existente (de la biblioteca del usuario) a un tema, sin
+    volver a subirlo. Idempotente. Devuelve el PDF con su question_count/link_count
+    para pintarlo en la lista del tema."""
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    pdf = await db.pdfs.find_one({"id": pdf_id, "user_id": uid}, {"_id": 0, "text": 0})
+    if not pdf:
+        raise HTTPException(status_code=404, detail="PDF no encontrado")
+    await _link_pdf_to_topic(uid, pdf_id, topic_id, topic.get("subject_id"))
+    pdf["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": pdf_id})
+    pdf["link_count"] = await db.pdf_links.count_documents({"user_id": uid, "pdf_id": pdf_id})
+    return pdf
+
+
+@api.delete("/topics/{topic_id}/pdfs/{pdf_id}")
+async def unlink_pdf_from_topic(topic_id: str, pdf_id: str, current_user: dict = Depends(get_current_user)):
+    """Quita un PDF de un tema (desvincula). NO borra el PDF si sigue vinculado a
+    otros temas; si era el último vínculo queda huérfano y se borra, desligando sus
+    preguntas (que se conservan, solo pierden la referencia al PDF).
+
+    Devuelve {ok, pdf_deleted}: pdf_deleted indica si el PDF se eliminó por completo
+    (era su último tema) o solo se quitó de este."""
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    res = await db.pdf_links.delete_one({"user_id": uid, "pdf_id": pdf_id, "topic_id": topic_id})
+    # TODO-FASE3: caso legacy — PDF que pertenece al tema por pdfs.topic_id sin
+    # pdf_link (datos pre-migración). Lo desvinculamos quitando también topic_id.
+    legacy = await db.pdfs.find_one(
+        {"id": pdf_id, "user_id": uid, "topic_id": topic_id}, {"_id": 0, "id": 1}
+    )
+    if res.deleted_count == 0 and not legacy:
+        raise HTTPException(status_code=404, detail="El PDF no está en este tema")
+    if legacy:
+        await db.pdfs.update_one({"id": pdf_id, "user_id": uid}, {"$unset": {"topic_id": ""}})
+    pdf_deleted = await _delete_pdf_if_orphan(uid, pdf_id)
+    if pdf_deleted:
+        await db.questions.update_many(
+            {"user_id": uid, "pdf_source_id": pdf_id}, {"$set": {"pdf_source_id": None}}
+        )
+    return {"ok": True, "pdf_deleted": pdf_deleted}
 
 
 class GenerateFromPdfsReq(BaseModel):
