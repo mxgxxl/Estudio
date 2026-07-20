@@ -24,6 +24,7 @@ import {
     toggleDifficult as apiDiff,
     deleteQuestion,
     deletePdf,
+    unlinkPdfFromTopic,
     generateTopicSummary,
 } from "@/lib/api";
 import GenerateDialog from "@/components/GenerateDialog";
@@ -38,6 +39,8 @@ export default function TopicDetail() {
     const [genOpen, setGenOpen] = useState(false);
     const [genDefault, setGenDefault] = useState(null);
     const [addOpen, setAddOpen] = useState(false);
+    const [pdfToRemove, setPdfToRemove] = useState(null); // PDF pendiente de quitar/borrar
+    const [removing, setRemoving] = useState(false);
     const [summary, setSummary] = useState(null);
     const [summaryOpen, setSummaryOpen] = useState(false);
     const [summaryLoading, setSummaryLoading] = useState(false);
@@ -87,11 +90,39 @@ export default function TopicDetail() {
         setQuestions((qs) => qs.filter((q) => q.id !== qid));
     };
 
-    const removePdf = async (pid) => {
-        if (!window.confirm("¿Eliminar este PDF? Las preguntas generadas se conservan.")) return;
-        await deletePdf(pid);
-        toast.success("PDF eliminado");
-        setPdfs((ps) => ps.filter((p) => p.id !== pid));
+    // Quitar de ESTE tema (desvincular). Si es su único tema, el backend lo
+    // elimina por completo; en cualquier caso las preguntas se conservan.
+    const unlinkCurrentPdf = async () => {
+        const p = pdfToRemove;
+        if (!p) return;
+        setRemoving(true);
+        try {
+            const { pdf_deleted } = await unlinkPdfFromTopic(id, p.id);
+            toast.success(pdf_deleted ? "PDF eliminado" : "PDF quitado de este tema");
+            setPdfs((ps) => ps.filter((x) => x.id !== p.id));
+            setPdfToRemove(null);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "No se pudo quitar el PDF");
+        } finally {
+            setRemoving(false);
+        }
+    };
+
+    // Borrar el PDF por completo (de TODOS los temas). Las preguntas se conservan.
+    const deletePdfForever = async () => {
+        const p = pdfToRemove;
+        if (!p) return;
+        setRemoving(true);
+        try {
+            await deletePdf(p.id);
+            toast.success("PDF eliminado de todos los temas");
+            setPdfs((ps) => ps.filter((x) => x.id !== p.id));
+            setPdfToRemove(null);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "No se pudo eliminar el PDF");
+        } finally {
+            setRemoving(false);
+        }
     };
 
     const generateSummary = async () => {
@@ -278,8 +309,9 @@ export default function TopicDetail() {
                                         Generar de este
                                     </button>
                                     <button
-                                        onClick={() => removePdf(p.id)}
+                                        onClick={() => setPdfToRemove(p)}
                                         data-testid={`del-pdf-${p.id}`}
+                                        title="Quitar de este tema"
                                         className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)]"
                                     >
                                         <Trash2 className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
@@ -430,9 +462,80 @@ export default function TopicDetail() {
             <AddPdfDialog
                 open={addOpen}
                 topicId={topic.id}
+                currentPdfIds={pdfs.map((p) => p.id)}
                 onClose={() => setAddOpen(false)}
                 onUploaded={load}
             />
+
+            {pdfToRemove && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                    style={{ background: "rgba(35,33,31,0.45)" }}
+                    data-testid="remove-pdf-dialog"
+                >
+                    <div className="card-organic w-full max-w-md fade-up" style={{ background: "white" }}>
+                        <div className="p-5 border-b" style={{ borderColor: "var(--border)" }}>
+                            <h3 className="font-display text-xl font-bold">Quitar PDF del tema</h3>
+                            <p className="text-sm mt-1 truncate" style={{ color: "var(--text-muted)" }}>
+                                {pdfToRemove.filename}
+                            </p>
+                        </div>
+                        <div className="p-5 space-y-4">
+                            {pdfToRemove.link_count > 1 ? (
+                                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                                    Este PDF está en <strong>{pdfToRemove.link_count} temas</strong>. Puedes
+                                    quitarlo solo de <strong>este</strong> tema (seguirá disponible en los demás)
+                                    o eliminarlo por completo de todos.
+                                    {" "}<strong>Las preguntas ya generadas se conservan</strong> en ambos casos.
+                                </p>
+                            ) : (
+                                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                                    Este PDF no está en ningún otro tema, así que al quitarlo se
+                                    <strong> eliminará por completo</strong>.
+                                    {" "}<strong>Las preguntas ya generadas se conservan.</strong>
+                                </p>
+                            )}
+
+                            <div className="flex flex-col gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    onClick={unlinkCurrentPdf}
+                                    disabled={removing}
+                                    data-testid="remove-pdf-unlink"
+                                    className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+                                >
+                                    {removing && <Loader2 className="w-4 h-4 animate-spin" />}
+                                    {pdfToRemove.link_count > 1 ? "Quitar de este tema" : "Quitar y eliminar"}
+                                </button>
+
+                                {pdfToRemove.link_count > 1 && (
+                                    <button
+                                        type="button"
+                                        onClick={deletePdfForever}
+                                        disabled={removing}
+                                        data-testid="remove-pdf-delete-forever"
+                                        className="w-full px-4 py-2.5 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)]"
+                                        style={{ borderColor: "var(--border)", color: "var(--error, #B84A4A)" }}
+                                    >
+                                        Borrar definitivamente (de todos los temas)
+                                    </button>
+                                )}
+
+                                <button
+                                    type="button"
+                                    onClick={() => setPdfToRemove(null)}
+                                    disabled={removing}
+                                    data-testid="remove-pdf-cancel"
+                                    className="w-full px-4 py-2.5 rounded-md font-medium text-sm hover:bg-[color:var(--bg-secondary)]"
+                                    style={{ color: "var(--text-secondary)" }}
+                                >
+                                    Cancelar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

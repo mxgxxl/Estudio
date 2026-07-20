@@ -103,6 +103,12 @@ export const addPdfToTopic = (topicId, formData) =>
             timeout: 120000,
         })
         .then((r) => r.data);
+// Biblioteca de PDFs del usuario (para reutilizar en varios temas)
+export const listPdfs = () => api.get("/pdfs").then((r) => r.data);
+export const linkPdfToTopic = (topicId, pdfId) =>
+    api.post(`/topics/${topicId}/pdfs/${pdfId}/link`).then((r) => r.data);
+export const unlinkPdfFromTopic = (topicId, pdfId) =>
+    api.delete(`/topics/${topicId}/pdfs/${pdfId}`).then((r) => r.data);
 export const generateFromTopicPdfs = (topicId, payload) =>
     api.post(`/topics/${topicId}/generate`, payload, { timeout: 300000 }).then((r) => r.data);
 
