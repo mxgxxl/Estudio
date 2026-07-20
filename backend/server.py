@@ -1029,11 +1029,19 @@ async def update_subject(subject_id: str, req: SubjectUpdate, current_user: dict
 async def delete_subject(subject_id: str, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
     topic_ids = [t["id"] async for t in db.topics.find({"subject_id": subject_id, "user_id": uid}, {"_id": 0, "id": 1})]
+    # PDFs afectados (de todos los temas de la asignatura) ANTES de borrar vínculos.
+    pdf_ids: set = set()
+    for tid in topic_ids:
+        pdf_ids.update(await _topic_pdf_ids(uid, tid))
     res = await db.subjects.delete_one({"id": subject_id, "user_id": uid})
     await db.topics.delete_many({"subject_id": subject_id, "user_id": uid})
     await db.questions.delete_many({"subject_id": subject_id, "user_id": uid})
     if topic_ids:
-        await db.pdfs.delete_many({"topic_id": {"$in": topic_ids}, "user_id": uid})
+        await db.pdf_links.delete_many({"user_id": uid, "topic_id": {"$in": topic_ids}})
+    # Borra cada PDF SOLO si quedó huérfano (podría seguir vinculado a otro tema
+    # fuera de esta asignatura).
+    for pid in pdf_ids:
+        await _delete_pdf_if_orphan(uid, pid)
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     return {"ok": True}
@@ -1054,7 +1062,7 @@ async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
         ]).to_list(1)
         t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
-        t["pdf_count"] = await db.pdfs.count_documents({"user_id": uid, "topic_id": t["id"]})
+        t["pdf_count"] = len(await _topic_pdf_ids(uid, t["id"]))
     return topics
 
 
@@ -1081,7 +1089,7 @@ async def get_topic(topic_id: str, current_user: dict = Depends(get_current_user
     if not t:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": topic_id})
-    t["pdf_count"] = await db.pdfs.count_documents({"user_id": uid, "topic_id": topic_id})
+    t["pdf_count"] = len(await _topic_pdf_ids(uid, topic_id))
     agg = await db.questions.aggregate([
         {"$match": {"user_id": uid, "topic_id": topic_id}},
         {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
@@ -1100,7 +1108,8 @@ async def get_topic_text(topic_id: str, current_user: dict = Depends(get_current
     topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
-    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
+    pdfs = await db.pdfs.find({"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
     parts = []
@@ -1159,6 +1168,7 @@ async def upload_topic_pdf(
         char_count=len(text),
     )
     await db.pdfs.insert_one(pdf_source.model_dump())
+    await _link_pdf_to_topic(uid, pdf_source.id, topic.id, subject_id)
 
     try:
         generated = await generate_questions_with_claude(
@@ -1169,12 +1179,14 @@ async def upload_topic_pdf(
         await _refund_ai_quota(current_user)
         await db.topics.delete_one({"id": topic.id})
         await db.pdfs.delete_one({"id": pdf_source.id})
+        await db.pdf_links.delete_many({"user_id": uid, "pdf_id": pdf_source.id})
         raise
 
     if not generated:
         await _refund_ai_quota(current_user)
         await db.topics.delete_one({"id": topic.id})
         await db.pdfs.delete_one({"id": pdf_source.id})
+        await db.pdf_links.delete_many({"user_id": uid, "pdf_id": pdf_source.id})
         raise HTTPException(status_code=502, detail="La IA no generó preguntas válidas")
 
     docs = []
@@ -1207,9 +1219,14 @@ async def upload_topic_pdf(
 @api.delete("/topics/{topic_id}")
 async def delete_topic(topic_id: str, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
+    # PDFs afectados ANTES de borrar los vínculos (para el chequeo de orfandad).
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
     res = await db.topics.delete_one({"id": topic_id, "user_id": uid})
     await db.questions.delete_many({"topic_id": topic_id, "user_id": uid})
-    await db.pdfs.delete_many({"topic_id": topic_id, "user_id": uid})
+    await db.pdf_links.delete_many({"user_id": uid, "topic_id": topic_id})
+    # Borra cada PDF SOLO si ya no le queda ningún vínculo (huérfano).
+    for pid in pdf_ids:
+        await _delete_pdf_if_orphan(uid, pid)
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     return {"ok": True}
@@ -1226,13 +1243,56 @@ async def topic_questions(topic_id: str, current_user: dict = Depends(get_curren
 
 
 # ---- PDF sources ----
+# Helpers de la relación muchos-a-muchos PDF<->tema (colección pdf_links).
+async def _topic_pdf_ids(uid: str, topic_id: str) -> List[str]:
+    """IDs de los PDFs asociados a un tema, leídos de pdf_links.
+
+    TODO-FASE3: fallback transitorio. Si el tema no tiene ninguna pdf_link (datos
+    aún sin migrar), cae a la relación antigua embebida pdfs.topic_id. Eliminar
+    este fallback cuando la migración a pdf_links esté garantizada en todos los
+    entornos y se retire pdfs.topic_id."""
+    links = await db.pdf_links.find(
+        {"user_id": uid, "topic_id": topic_id}, {"_id": 0, "pdf_id": 1}
+    ).to_list(1000)
+    if links:
+        return [l["pdf_id"] for l in links]
+    # TODO-FASE3: relación antigua embebida (pre-migración).
+    legacy = await db.pdfs.find(
+        {"user_id": uid, "topic_id": topic_id}, {"_id": 0, "id": 1}
+    ).to_list(1000)
+    return [p["id"] for p in legacy]
+
+
+async def _link_pdf_to_topic(uid: str, pdf_id: str, topic_id: str, subject_id: Optional[str]) -> None:
+    """Asocia (idempotente) un PDF a un tema creando una pdf_link si no existe."""
+    link = PdfLink(user_id=uid, pdf_id=pdf_id, topic_id=topic_id, subject_id=subject_id)
+    await db.pdf_links.update_one(
+        {"user_id": uid, "pdf_id": pdf_id, "topic_id": topic_id},
+        {"$setOnInsert": link.model_dump()},
+        upsert=True,
+    )
+
+
+async def _delete_pdf_if_orphan(uid: str, pdf_id: str) -> bool:
+    """Borra el documento `pdfs` SOLO si no le queda ninguna pdf_link (huérfano).
+    Devuelve True si lo borró. No toca las preguntas (las gestiona el llamador)."""
+    remaining = await db.pdf_links.count_documents({"user_id": uid, "pdf_id": pdf_id})
+    if remaining == 0:
+        await db.pdfs.delete_one({"id": pdf_id, "user_id": uid})
+        return True
+    return False
+
+
 @api.get("/topics/{topic_id}/pdfs")
 async def list_topic_pdfs(topic_id: str, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
     topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
-    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0, "text": 0}).sort("created_at", 1).to_list(100)
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
+    pdfs = await db.pdfs.find(
+        {"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0, "text": 0}
+    ).sort("created_at", 1).to_list(100)
     for p in pdfs:
         p["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": p["id"]})
     return pdfs
@@ -1250,7 +1310,11 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dic
     pdf = await db.pdfs.find_one({"id": pdf_id, "user_id": uid}, {"_id": 0})
     if not pdf:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
-    topic = await db.topics.find_one({"id": pdf["topic_id"], "user_id": uid}, {"_id": 0})
+    # Resolver el tema al que regenerar vía pdf_links (en Fase 1 hay uno solo).
+    # TODO-FASE3: fallback a pdf.topic_id mientras existan PDFs sin migrar.
+    link = await db.pdf_links.find_one({"user_id": uid, "pdf_id": pdf_id}, {"_id": 0, "topic_id": 1})
+    resolved_topic_id = link["topic_id"] if link else pdf.get("topic_id")
+    topic = await db.topics.find_one({"id": resolved_topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     if req.num_questions < 3 or req.num_questions > 80:
@@ -1290,10 +1354,13 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dic
 
 @api.delete("/pdfs/{pdf_id}")
 async def delete_pdf(pdf_id: str, current_user: dict = Depends(get_current_user)):
+    """Borra el PDF por completo (de TODOS los temas): elimina sus pdf_links, el
+    documento pdfs y desliga sus preguntas."""
     uid = current_user["id"]
     res = await db.pdfs.delete_one({"id": pdf_id, "user_id": uid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
+    await db.pdf_links.delete_many({"user_id": uid, "pdf_id": pdf_id})
     await db.questions.update_many({"pdf_source_id": pdf_id, "user_id": uid}, {"$set": {"pdf_source_id": None}})
     return {"ok": True}
 
@@ -1321,6 +1388,7 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_
         char_count=len(text),
     )
     await db.pdfs.insert_one(pdf_source.model_dump())
+    await _link_pdf_to_topic(uid, pdf_source.id, topic_id, topic.get("subject_id"))
     return {
         "id": pdf_source.id,
         "topic_id": topic_id,
@@ -1350,8 +1418,11 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, curr
     if req.num_questions < 3 or req.num_questions > 80:
         raise HTTPException(status_code=400, detail="num_questions debe estar entre 3 y 80")
 
+    # Solo se aceptan PDFs realmente asociados a este tema (vía pdf_links).
+    allowed = set(await _topic_pdf_ids(uid, topic_id))
+    wanted = [pid for pid in req.pdf_ids if pid in allowed]
     pdfs = await db.pdfs.find(
-        {"id": {"$in": req.pdf_ids}, "topic_id": topic_id, "user_id": uid}, {"_id": 0}
+        {"id": {"$in": wanted}, "user_id": uid}, {"_id": 0}
     ).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No se encontraron PDFs")
@@ -1934,7 +2005,8 @@ async def generate_topic_flashcards(topic_id: str, num_cards: int = 15, current_
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
+    pdfs = await db.pdfs.find({"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 
@@ -2504,7 +2576,8 @@ async def generate_topic_summary(topic_id: str, current_user: dict = Depends(get
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdfs = await db.pdfs.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(100)
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
+    pdfs = await db.pdfs.find({"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 
