@@ -286,7 +286,19 @@ export default function TopicDetail() {
                                         <FileText className="w-4 h-4" style={{ color: subjectColor }} />
                                     </div>
                                     <div className="min-w-0">
-                                        <div className="text-sm font-medium truncate">{p.filename}</div>
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="text-sm font-medium truncate">{p.filename}</span>
+                                            {p.link_count > 1 && (
+                                                <span
+                                                    data-testid={`pdf-linkcount-${p.id}`}
+                                                    title="Este PDF está en varios temas"
+                                                    className="shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium"
+                                                    style={{ background: "var(--bg-secondary)", color: "var(--text-muted)" }}
+                                                >
+                                                    en {p.link_count} temas
+                                                </span>
+                                            )}
+                                        </div>
                                         <div
                                             className="text-xs font-mono"
                                             style={{ color: "var(--text-muted)" }}
