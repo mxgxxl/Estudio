@@ -118,8 +118,9 @@ class PdfSource(BaseModel):
     user_id: str
     # topic_id se mantiene por compatibilidad/rollback en la Fase 1 (el backend nuevo
     # NO lo lee: la relación PDF<->tema vive en la colección pdf_links). Se eliminará
-    # en una fase posterior cuando ya no haga falta.
-    topic_id: str
+    # en una fase posterior cuando ya no haga falta. Opcional: un PDF de biblioteca
+    # (subido sin tema, Fase 3) nace sin topic_id ni vínculos.
+    topic_id: Optional[str] = None
     filename: str
     text: str
     char_count: int = 0
@@ -1318,6 +1319,40 @@ async def list_all_pdfs(current_user: dict = Depends(get_current_user)):
         p["link_count"] = len(tids)
         p["question_count"] = await db.questions.count_documents({"user_id": uid, "pdf_source_id": p["id"]})
     return pdfs
+
+
+@api.post("/pdfs")
+async def upload_pdf_to_library(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """Sube un PDF a la biblioteca del usuario SIN vincularlo a ningún tema (Fase 3).
+    Queda con link_count 0 hasta que se asocie a un tema. No llama a Gemini, así que
+    no consume cuota de IA."""
+    uid = current_user["id"]
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan ficheros PDF")
+    pdf_bytes = await file.read()
+    try:
+        text = extract_pdf_text(pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error al leer el PDF: {e}") from e
+    if len(text) < 200:
+        raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
+    pdf_source = PdfSource(
+        user_id=uid,
+        topic_id=None,  # PDF de biblioteca: sin tema ni vínculos aún.
+        filename=file.filename,
+        text=text,
+        char_count=len(text),
+    )
+    await db.pdfs.insert_one(pdf_source.model_dump())
+    return {
+        "id": pdf_source.id,
+        "filename": pdf_source.filename,
+        "char_count": pdf_source.char_count,
+        "created_at": pdf_source.created_at,
+        "question_count": 0,
+        "link_count": 0,
+        "topic_ids": [],
+    }
 
 
 class RegenerateReq(BaseModel):

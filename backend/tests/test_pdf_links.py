@@ -396,3 +396,82 @@ class TestLinkUnlinkEndpoints:
         sb = _subject(client, hb, "SB"); _t2, pb = _upload_topic(client, hb, sb, "TB")
         assert set(_list_pdfs(client, ha).keys()) == {pa}
         assert set(_list_pdfs(client, hb).keys()) == {pb}
+
+
+# --------------------------------------------------------------------------
+# Fase 3: subir a la biblioteca sin tema (POST /pdfs)
+# --------------------------------------------------------------------------
+def _upload_library_pdf(client, h, name="lib.pdf"):
+    r = client.post(
+        "/api/pdfs",
+        files={"file": (name, b"%PDF-1.4 fake", "application/pdf")},
+        headers=h,
+    )
+    return r
+
+
+class TestLibraryUpload:
+    def test_upload_creates_unlinked_pdf(self, client, srv):
+        uid = _register(client, "l3a@t.com")
+        h = _login(client, "l3a@t.com")
+        r = _upload_library_pdf(client, h, "suelto.pdf")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        pid = body["id"]
+        assert body["link_count"] == 0 and body["topic_ids"] == [] and body["question_count"] == 0
+        # Existe en la biblioteca, sin vínculos y sin topic_id.
+        assert _pdf_exists(srv, uid, pid)
+        assert _links_count(srv, uid, pid) == 0
+        lib = _list_pdfs(client, h)
+        assert pid in lib and lib[pid]["link_count"] == 0
+        doc = asyncio.run(srv.db.pdfs.find_one({"id": pid}, {"_id": 0, "topic_id": 1}))
+        assert doc.get("topic_id") is None
+
+    def test_library_pdf_survives_topic_and_subject_deletion(self, client, srv):
+        uid = _register(client, "l3b@t.com")
+        h = _login(client, "l3b@t.com")
+        # Un PDF de biblioteca sin vincular.
+        lib_pid = _upload_library_pdf(client, h, "biblio.pdf").json()["id"]
+        # Y contenido normal que sí se borrará.
+        s = _subject(client, h, "S")
+        t1, p1 = _upload_topic(client, h, s, "T1")
+
+        assert client.delete(f"/api/topics/{t1}", headers=h).status_code == 200
+        assert not _pdf_exists(srv, uid, p1)          # el del tema se borra
+        assert _pdf_exists(srv, uid, lib_pid)         # el de biblioteca NO se toca
+
+        assert client.delete(f"/api/subjects/{s}", headers=h).status_code == 200
+        assert _pdf_exists(srv, uid, lib_pid)         # sigue intacto tras borrar la asignatura
+
+    def test_library_pdf_can_be_linked_then_orphaned(self, client, srv):
+        uid = _register(client, "l3c@t.com")
+        h = _login(client, "l3c@t.com")
+        lib_pid = _upload_library_pdf(client, h).json()["id"]
+        s = _subject(client, h, "S")
+        t1, _ = _upload_topic(client, h, s, "T1")
+
+        # Vincular el PDF de biblioteca al tema.
+        assert client.post(f"/api/topics/{t1}/pdfs/{lib_pid}/link", headers=h).status_code == 200
+        assert lib_pid in _topic_pdf_ids(client, h, t1)
+        assert _links_count(srv, uid, lib_pid) == 1
+
+        # Desvincular del único tema -> huérfano -> se borra (comportamiento normal).
+        r = client.delete(f"/api/topics/{t1}/pdfs/{lib_pid}", headers=h)
+        assert r.status_code == 200 and r.json()["pdf_deleted"] is True
+        assert not _pdf_exists(srv, uid, lib_pid)
+
+    def test_delete_library_pdf_with_zero_links(self, client, srv):
+        uid = _register(client, "l3d@t.com")
+        h = _login(client, "l3d@t.com")
+        lib_pid = _upload_library_pdf(client, h).json()["id"]
+        assert client.delete(f"/api/pdfs/{lib_pid}", headers=h).status_code == 200
+        assert not _pdf_exists(srv, uid, lib_pid)
+
+    def test_upload_validations(self, client, srv):
+        _register(client, "l3e@t.com")
+        h = _login(client, "l3e@t.com")
+        # No es PDF.
+        r = client.post("/api/pdfs", files={"file": ("x.txt", b"hola", "text/plain")}, headers=h)
+        assert r.status_code == 400
+        # Requiere autenticación.
+        assert client.post("/api/pdfs", files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")}).status_code == 401
