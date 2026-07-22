@@ -6,6 +6,7 @@ import os
 import io
 import re
 import json
+import asyncio
 import hmac
 import hashlib
 import uuid
@@ -2036,6 +2037,10 @@ class Flashcard(BaseModel):
     topic_id: str
     topic_name: str
     subject_id: Optional[str] = None
+    # PDF del que se extrajo la tarjeta (alineado con Question.pdf_source_id).
+    # None = tarjeta "sin fuente": las legacy anteriores a este campo y las de
+    # temas multi-PDF que no se pudieron atribuir en el backfill.
+    pdf_source_id: Optional[str] = None
     term: str
     definition: str
     example: Optional[str] = ""
@@ -2046,6 +2051,37 @@ class Flashcard(BaseModel):
     srs_ease: float = 2.5
     srs_next_review: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def _distribute_cards(total: int, weights: List[int]) -> List[int]:
+    """Reparte `total` tarjetas entre PDFs proporcionalmente a sus `weights`
+    (char_count), usando el método del resto mayor para sumar EXACTAMENTE
+    `total`. Garantiza >= 1 por PDF cuando el presupuesto lo permite
+    (total >= nº de PDFs), para que ninguna fuente seleccionada quede sin
+    representación; un anexo diminuto recibe pocas, no cero."""
+    n = len(weights)
+    if n == 0 or total <= 0:
+        return [0] * n
+    total_w = sum(weights)
+    if total_w <= 0:  # todos con char_count 0: reparto uniforme
+        weights = [1] * n
+        total_w = n
+    raw = [total * w / total_w for w in weights]
+    counts = [int(x) for x in raw]  # suelo
+    remainder = total - sum(counts)
+    # Reparte el resto por mayor parte fraccionaria.
+    order = sorted(range(n), key=lambda i: raw[i] - counts[i], reverse=True)
+    for i in range(remainder):
+        counts[order[i % n]] += 1
+    # Mínimo 1 por PDF si cabe: sube los ceros quitando de los mayores.
+    if total >= n:
+        for i in range(n):
+            if counts[i] == 0:
+                j = max(range(n), key=lambda k: counts[k])
+                if counts[j] > 1:
+                    counts[j] -= 1
+                    counts[i] += 1
+    return counts
 
 
 async def _generate_flashcards_from_text(topic_name: str, source_text: str, num_cards: int) -> List[dict]:
@@ -2127,51 +2163,104 @@ async def get_topic_flashcards(topic_id: str, current_user: dict = Depends(get_c
     return cards
 
 
+class GenerateFlashcardsReq(BaseModel):
+    # None/vacío = todos los PDFs del tema (caso común, "1 clic").
+    pdf_ids: Optional[List[str]] = None
+    num_cards: int = 15
+
+
 @api.post("/topics/{topic_id}/flashcards/generate")
-async def generate_topic_flashcards(topic_id: str, num_cards: int = 15, current_user: dict = Depends(get_current_user)):
-    """Generate flashcards from the topic's PDF text using AI."""
+async def generate_topic_flashcards(
+    topic_id: str,
+    req: GenerateFlashcardsReq = GenerateFlashcardsReq(),
+    current_user: dict = Depends(get_current_user),
+):
+    """Genera flashcards desde los PDFs elegidos del tema (o todos por defecto).
+
+    Reemplazo POR PDF: se generan por fuente (una llamada a Gemini por PDF, en
+    paralelo) y cada tarjeta guarda su `pdf_source_id`. Al regenerar:
+    - subconjunto → solo se reemplazan las tarjetas de esos PDFs (conserva el
+      resto y su progreso SRS/favoritos, incl. las legacy sin fuente);
+    - todos los PDFs del tema → se reemplaza el tema entero (barre también las
+      legacy `pdf_source_id=None`), como el "Regenerar" de siempre.
+    La operación cuenta como 1 unidad de cuota aunque haga N llamadas.
+    """
     uid = current_user["id"]
     topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdf_ids = await _topic_pdf_ids(uid, topic_id)
-    pdfs = await db.pdfs.find({"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
-    if not pdfs:
+    all_ids = await _topic_pdf_ids(uid, topic_id)
+    if not all_ids:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 
-    combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text']}" for p in pdfs])
-    num_cards = max(5, min(30, num_cards))
+    # Solo se aceptan PDFs realmente asociados al tema; vacío/ausente = todos.
+    if req.pdf_ids:
+        selected_ids = [pid for pid in req.pdf_ids if pid in set(all_ids)]
+        if not selected_ids:
+            raise HTTPException(status_code=404, detail="No se encontraron PDFs")
+    else:
+        selected_ids = list(all_ids)
+    is_full = set(selected_ids) == set(all_ids)
 
-    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    pdfs = await db.pdfs.find({"id": {"$in": selected_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
+    if not pdfs:
+        raise HTTPException(status_code=404, detail="No se encontraron PDFs")
+
+    num_cards = max(5, min(30, req.num_cards))
+    alloc = _distribute_cards(num_cards, [max(0, int(p.get("char_count", 0))) for p in pdfs])
+
+    # Comprobar plan + cuota ANTES de llamar a Gemini (1 unidad para toda la
+    # operación, aunque genere de N PDFs).
     await check_and_consume_ai_quota(current_user)
-    cards = await _generate_flashcards_from_text(topic["name"], combined, num_cards)
-    if not cards:
-        # _generate_flashcards_from_text devuelve [] en fallo: revertir el consumo.
+
+    # Una llamada a Gemini por PDF, en PARALELO (la espera ≈ la más lenta, no la
+    # suma). Los PDFs con 0 tarjetas asignadas no se llaman.
+    targets = [(p, n) for p, n in zip(pdfs, alloc) if n > 0]
+    results = await asyncio.gather(
+        *[_generate_flashcards_from_text(topic["name"], p["text"], n) for p, n in targets],
+        return_exceptions=True,
+    )
+
+    docs = []
+    for (p, _n), res in zip(targets, results):
+        # Todo-o-nada: si alguna fuente falla (excepción o [] por error de la
+        # IA), no dejamos un estado a medias; revertimos la cuota y abortamos.
+        if isinstance(res, Exception) or not res:
+            await _refund_ai_quota(current_user)
+            raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
+        for c in res:
+            fc = Flashcard(
+                user_id=uid,
+                topic_id=topic_id,
+                topic_name=topic["name"],
+                subject_id=topic.get("subject_id"),
+                pdf_source_id=p["id"],
+                term=c["term"],
+                definition=c["definition"],
+                example=c.get("example", ""),
+            )
+            docs.append(fc.model_dump())
+
+    if not docs:
         await _refund_ai_quota(current_user)
         raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
 
-    docs = []
-    for c in cards:
-        fc = Flashcard(
-            user_id=uid,
-            topic_id=topic_id,
-            topic_name=topic["name"],
-            subject_id=topic.get("subject_id"),
-            term=c["term"],
-            definition=c["definition"],
-            example=c.get("example", ""),
+    # Reemplazo selectivo: solo las tarjetas de los PDFs regenerados. Si se
+    # regeneran TODOS, se barre el tema completo (incluidas las legacy None).
+    if is_full:
+        await db.flashcards.delete_many({"topic_id": topic_id, "user_id": uid})
+    else:
+        await db.flashcards.delete_many(
+            {"topic_id": topic_id, "user_id": uid, "pdf_source_id": {"$in": selected_ids}}
         )
-        docs.append(fc.model_dump())
+    await db.flashcards.insert_many(docs)
 
-    # Replace existing flashcards for this topic
-    await db.flashcards.delete_many({"topic_id": topic_id, "user_id": uid})
-    if docs:
-        await db.flashcards.insert_many(docs)
-        # Re-fetch to avoid ObjectId serialization issues
-        docs = await db.flashcards.find({"topic_id": topic_id, "user_id": uid}, {"_id": 0}).to_list(500)
-
-    return {"flashcards_created": len(docs), "flashcards": docs}
+    # Devuelve TODAS las del tema (las nuevas + las conservadas), ordenadas.
+    all_cards = await db.flashcards.find(
+        {"topic_id": topic_id, "user_id": uid}, {"_id": 0}
+    ).sort("created_at", 1).to_list(500)
+    return {"flashcards_created": len(docs), "flashcards": all_cards}
 
 
 @api.post("/flashcards/{card_id}/review")
@@ -2698,16 +2787,37 @@ async def save_survival_record(req: SaveSurvivalRecordReq, current_user: dict = 
 # ---------------------------------------------------------------------------
 # AI Topic Summary
 # ---------------------------------------------------------------------------
+class SummaryReq(BaseModel):
+    # None/vacío = todos los PDFs del tema (caso común, "1 clic").
+    pdf_ids: Optional[List[str]] = None
+
+
 @api.post("/topics/{topic_id}/summary")
-async def generate_topic_summary(topic_id: str, current_user: dict = Depends(get_current_user)):
-    """Generate a structured summary of a topic using AI."""
+async def generate_topic_summary(
+    topic_id: str,
+    req: SummaryReq = SummaryReq(),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate a structured summary of a topic using AI.
+
+    Se genera al vuelo (no se persiste) a partir de los PDFs elegidos, o de
+    todos por defecto. `pdf_ids` se valida contra los PDFs del tema.
+    """
     uid = current_user["id"]
     topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
 
-    pdf_ids = await _topic_pdf_ids(uid, topic_id)
-    pdfs = await db.pdfs.find({"id": {"$in": pdf_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
+    all_ids = await _topic_pdf_ids(uid, topic_id)
+    if not all_ids:
+        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
+    if req.pdf_ids:
+        selected_ids = [pid for pid in req.pdf_ids if pid in set(all_ids)]
+        if not selected_ids:
+            raise HTTPException(status_code=404, detail="No se encontraron PDFs")
+    else:
+        selected_ids = list(all_ids)
+    pdfs = await db.pdfs.find({"id": {"$in": selected_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
     if not pdfs:
         raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
 

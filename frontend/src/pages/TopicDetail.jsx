@@ -29,6 +29,7 @@ import {
 } from "@/lib/api";
 import GenerateDialog from "@/components/GenerateDialog";
 import AddPdfDialog from "@/components/AddPdfDialog";
+import PdfSelectDialog from "@/components/PdfSelectDialog";
 
 export default function TopicDetail() {
     const { id } = useParams();
@@ -44,6 +45,7 @@ export default function TopicDetail() {
     const [summary, setSummary] = useState(null);
     const [summaryOpen, setSummaryOpen] = useState(false);
     const [summaryLoading, setSummaryLoading] = useState(false);
+    const [summaryPickOpen, setSummaryPickOpen] = useState(false); // selector de PDFs (temas con >1 PDF)
 
     const load = async () => {
         try {
@@ -125,18 +127,28 @@ export default function TopicDetail() {
         }
     };
 
-    const generateSummary = async () => {
-        if (summary) { setSummaryOpen(o => !o); return; }
+    // Genera el resumen con los PDFs indicados (null = todos). Cierra el
+    // selector si estaba abierto y muestra el panel.
+    const runSummary = async (pdfIds = null) => {
         setSummaryLoading(true);
         try {
-            const data = await generateTopicSummary(topic.id);
+            const data = await generateTopicSummary(topic.id, pdfIds);
             setSummary(data);
             setSummaryOpen(true);
+            setSummaryPickOpen(false);
         } catch {
             toast.error("Error al generar el resumen");
         } finally {
             setSummaryLoading(false);
         }
+    };
+
+    // Botón "Resumen IA": si ya hay resumen, alterna el panel; si hay >1 PDF,
+    // abre el selector; con ≤1 PDF genera directo (un clic, sin fricción).
+    const onSummaryClick = () => {
+        if (summary) { setSummaryOpen(o => !o); return; }
+        if (pdfs.length > 1) { setSummaryPickOpen(true); return; }
+        runSummary(null);
     };
 
     if (!topic) {
@@ -171,7 +183,7 @@ export default function TopicDetail() {
                 </div>
                 <div className="flex gap-2">
                     <button
-                        onClick={generateSummary}
+                        onClick={onSummaryClick}
                         data-testid="summary-btn"
                         className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
                         style={{ borderColor: "var(--border)" }}
@@ -477,6 +489,18 @@ export default function TopicDetail() {
                 currentPdfIds={pdfs.map((p) => p.id)}
                 onClose={() => setAddOpen(false)}
                 onUploaded={load}
+            />
+
+            <PdfSelectDialog
+                open={summaryPickOpen}
+                onClose={() => setSummaryPickOpen(false)}
+                title="Resumen IA"
+                subtitle="Elige de qué PDFs generar el resumen"
+                pdfs={pdfs}
+                loading={summaryLoading}
+                loadingText="Generando…"
+                submitLabel="Generar resumen"
+                onSubmit={(ids) => runSummary(ids)}
             />
 
             {pdfToRemove && (

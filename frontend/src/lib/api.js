@@ -140,8 +140,15 @@ export const evalDevAnswer = (payload) => api.post("/quiz/eval-dev", payload).th
 
 // Flashcards
 export const getTopicFlashcards = (topicId) => api.get(`/topics/${topicId}/flashcards`).then((r) => r.data);
-export const generateTopicFlashcards = (topicId, numCards = 15) =>
-    api.post(`/topics/${topicId}/flashcards/generate?num_cards=${numCards}`, {}, { timeout: 120000 }).then((r) => r.data);
+// pdfIds opcional (null/[] = todos los PDFs del tema)
+export const generateTopicFlashcards = (topicId, numCards = 15, pdfIds = null) =>
+    api
+        .post(
+            `/topics/${topicId}/flashcards/generate`,
+            { num_cards: numCards, ...(pdfIds && pdfIds.length ? { pdf_ids: pdfIds } : {}) },
+            { timeout: 300000 }
+        )
+        .then((r) => r.data);
 export const reviewFlashcard = (cardId, correct) =>
     api.post(`/flashcards/${cardId}/review?correct=${correct}`).then((r) => r.data);
 export const toggleFlashcardFavorite = (cardId) => api.post(`/flashcards/${cardId}/favorite`).then((r) => r.data);
@@ -153,7 +160,15 @@ export const getSurvivalRecord = (scopeType, scopeId) => api.get(`/survival/reco
 export const saveSurvivalRecord = (data) => api.post("/survival/records", data).then((r) => r.data);
 
 // AI Summary
-export const generateTopicSummary = (topicId) => api.post(`/topics/${topicId}/summary`, {}, { timeout: 120000 }).then((r) => r.data);
+// pdfIds opcional (null/[] = todos los PDFs del tema)
+export const generateTopicSummary = (topicId, pdfIds = null) =>
+    api
+        .post(
+            `/topics/${topicId}/summary`,
+            pdfIds && pdfIds.length ? { pdf_ids: pdfIds } : {},
+            { timeout: 120000 }
+        )
+        .then((r) => r.data);
 
 // Gap detector
 export const getKnowledgeGaps = () => api.get("/stats/gaps").then((r) => r.data);

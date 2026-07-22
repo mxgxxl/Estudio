@@ -5,7 +5,8 @@ import {
     ChevronRight, Sparkles, Loader2, BookOpen
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, getTopic } from "@/lib/api";
+import { api, getTopic, getTopicPdfs, generateTopicFlashcards } from "@/lib/api";
+import PdfSelectDialog from "@/components/PdfSelectDialog";
 
 function FlipCard({ card, flipped, onFlip, onCorrect, onWrong, isLast, onFinish }) {
     return (
@@ -108,16 +109,20 @@ export default function FlashcardMode() {
     const [generating, setGenerating] = useState(false);
     const [loading, setLoading] = useState(true);
     const [numCards, setNumCards] = useState(15);
+    const [pdfs, setPdfs] = useState([]);
+    const [pickOpen, setPickOpen] = useState(false); // selector de PDFs (temas con >1 PDF)
 
     const loadCards = useCallback(async () => {
         setLoading(true);
         try {
-            const [t, res] = await Promise.all([
+            const [t, res, ps] = await Promise.all([
                 getTopic(topicId),
                 api.get(`/topics/${topicId}/flashcards`),
+                getTopicPdfs(topicId),
             ]);
             setTopic(t);
             setCards(res.data);
+            setPdfs(ps);
         } catch {
             toast.error("Error al cargar flashcards");
         } finally {
@@ -127,21 +132,30 @@ export default function FlashcardMode() {
 
     useEffect(() => { loadCards(); }, [loadCards]);
 
-    const generate = async () => {
+    // Genera con los PDFs indicados (null = todos). Reemplazo por PDF en el
+    // backend: al regenerar un subconjunto se conservan las demás y su progreso.
+    const runGenerate = async (pdfIds = null) => {
         setGenerating(true);
         try {
-            const res = await api.post(`/topics/${topicId}/flashcards/generate?num_cards=${numCards}`);
-            setCards(res.data.flashcards);
+            const data = await generateTopicFlashcards(topicId, numCards, pdfIds);
+            setCards(data.flashcards);
             setIdx(0);
             setFlipped(false);
             setResults([]);
             setFinished(false);
-            toast.success(`${res.data.flashcards_created} flashcards generadas`);
+            setPickOpen(false);
+            toast.success(`${data.flashcards_created} flashcards generadas`);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Error al generar flashcards");
         } finally {
             setGenerating(false);
         }
+    };
+
+    // Con >1 PDF abre el selector; con ≤1 PDF genera directo (un clic).
+    const generate = () => {
+        if (pdfs.length > 1) { setPickOpen(true); return; }
+        runGenerate(null);
     };
 
     const handleCorrect = async () => {
@@ -233,10 +247,42 @@ export default function FlashcardMode() {
         );
     }
 
+    // Selector de PDFs (solo se abre en temas con >1 PDF). Incluye el nº de
+    // tarjetas para que la elección sea completa en un solo sitio.
+    const pickDialog = (
+        <PdfSelectDialog
+            open={pickOpen}
+            onClose={() => setPickOpen(false)}
+            title="Generar flashcards"
+            subtitle="Elige de qué PDFs generar las tarjetas"
+            pdfs={pdfs}
+            loading={generating}
+            loadingText="Generando…"
+            submitLabel="Generar flashcards"
+            onSubmit={(ids) => runGenerate(ids)}
+        >
+            <div className="flex items-center gap-3">
+                <label className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>
+                    Nº de tarjetas:
+                </label>
+                <input
+                    type="number"
+                    min={5} max={30}
+                    value={numCards}
+                    onChange={(e) => setNumCards(parseInt(e.target.value) || 15)}
+                    disabled={generating}
+                    className="w-16 p-1.5 border rounded text-center text-sm"
+                    style={{ borderColor: "var(--border)" }}
+                />
+            </div>
+        </PdfSelectDialog>
+    );
+
     // ---- Empty state ----
     if (cards.length === 0) {
         return (
             <div className="max-w-2xl mx-auto px-5 md:px-8 py-12">
+                {pickDialog}
                 <Link to={`/temas/${topicId}`} className="inline-flex items-center gap-1 text-sm font-medium mb-6 hover:underline" style={{ color: "var(--text-secondary)" }}>
                     <ArrowLeft className="w-4 h-4" /> Volver
                 </Link>
@@ -244,7 +290,7 @@ export default function FlashcardMode() {
                     <BookOpen className="w-12 h-12 mx-auto mb-4" style={{ color: "var(--brand)" }} />
                     <h2 className="font-display text-2xl font-bold mb-2">Sin flashcards todavía</h2>
                     <p className="text-sm mb-6" style={{ color: "var(--text-muted)" }}>
-                        Genera flashcards automáticamente a partir del PDF del tema.
+                        Genera flashcards automáticamente a partir de los PDFs del tema.
                     </p>
                     <div className="flex items-center justify-center gap-3 mb-4">
                         <label className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>
@@ -261,8 +307,13 @@ export default function FlashcardMode() {
                     </div>
                     <button onClick={generate} disabled={generating} className="btn-primary flex items-center gap-2 mx-auto">
                         {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                        Generar flashcards con IA
+                        {generating ? "Generando…" : "Generar flashcards con IA"}
                     </button>
+                    {generating && (
+                        <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
+                            Esto puede tardar hasta ~1 min. No cierres esta ventana.
+                        </p>
+                    )}
                 </div>
             </div>
         );
@@ -274,6 +325,7 @@ export default function FlashcardMode() {
     // ---- Main card view ----
     return (
         <div className="max-w-2xl mx-auto px-5 md:px-8 py-8">
+            {pickDialog}
             {/* Header */}
             <div className="flex items-center justify-between mb-6">
                 <Link to={`/temas/${topicId}`} className="inline-flex items-center gap-1 text-sm font-medium hover:underline" style={{ color: "var(--text-secondary)" }}>

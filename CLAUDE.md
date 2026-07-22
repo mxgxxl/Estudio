@@ -48,6 +48,7 @@ test_reports/          # resultados pytest por iteración
 ### Modelo de datos (colecciones MongoDB)
 `subjects`, `topics`, `pdfs` (texto extraído), `pdf_links`, `questions`, `attempts`, `flashcards`, `survival_records`, `paddle_events`.
 Las preguntas soportan `question_type` = `mcq` | `tf` | `dev`, penalización configurable y campos SRS (SM-2 simplificado).
+Las **flashcards** llevan `pdf_source_id` (de qué PDF salieron, como las `questions`); `None` = tarjeta "sin fuente" (legacy anterior al campo o tema multi-PDF no atribuible). Migración de backfill: `backend/scripts/migrate_flashcard_source.py` (idempotente, `DRY_RUN=1`) rellena `pdf_source_id` solo en temas de **1 PDF** (atribución inequívoca).
 
 **PDFs muchos-a-muchos (Fases 1-3).** Un PDF ya NO está atado a un tema: existe como
 entidad independiente y se asocia a varios temas/asignaturas mediante la colección
@@ -91,6 +92,13 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 - `DELETE /api/topics/{topic_id}/pdfs/{pdf_id}` — desvincula del tema; borra el PDF si era su último vínculo (`{ok, pdf_deleted}`).
 - `DELETE /api/pdfs/{pdf_id}` — borra el PDF por completo (de todos los temas) y desliga sus preguntas.
 - `GET /api/topics/{id}/pdfs` incluye `link_count` por PDF.
+
+**Generación con selección de PDFs (preguntas / resumen / flashcards):** los tres flujos aceptan elegir de qué PDFs generar, con `pdf_ids` **opcional** (ausente/vacío = todos los PDFs del tema); siempre validado contra `_topic_pdf_ids` (solo PDFs del tema, del usuario).
+- `POST /api/topics/{id}/generate` (preguntas) — body con `pdf_ids` + params; **aditivo** (nunca borra).
+- `POST /api/topics/{id}/summary` — body opcional `{ pdf_ids? }`; se genera **al vuelo** (no se persiste). Una sola llamada a Gemini con el texto combinado.
+- `POST /api/topics/{id}/flashcards/generate` — body `{ pdf_ids?, num_cards? }`. **Reemplazo POR PDF**: genera una llamada a Gemini **por PDF en paralelo** (`asyncio.gather`), reparte `num_cards` **proporcional al `char_count`** (`_distribute_cards`), y cada tarjeta guarda su `pdf_source_id`. Regenerar un **subconjunto** solo reemplaza esas fuentes (conserva el resto + su progreso SRS/favoritos + las legacy `None`); regenerar **todos** barre el tema entero (incl. legacy). Cuenta como **1 unidad de cuota** aunque haga N llamadas; **todo-o-nada** (si una fuente falla, refund + 502).
+
+Frontend: **`PdfPicker`** (selector presentacional de PDFs, todos preseleccionados) reutilizado por `GenerateDialog` (preguntas) y por **`PdfSelectDialog`** (resumen y flashcards). UX: con **≤1 PDF** se genera directo (un clic, sin fricción); con **>1 PDF** se abre el selector. Durante la generación se muestra feedback claro (spinner + "puede tardar hasta ~1 min") porque son varias llamadas a IA.
 
 **Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me`.
 
