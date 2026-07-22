@@ -115,6 +115,23 @@ export const unlinkPdfFromTopic = (topicId, pdfId) =>
 export const generateFromTopicPdfs = (topicId, payload) =>
     api.post(`/topics/${topicId}/generate`, payload, { timeout: 300000 }).then((r) => r.data);
 
+// Banco de preguntas (listado global con filtros)
+// filters: { subject_id, topic_id, pdf_source_id, question_type, status, q, sort, page, limit }
+export const listQuestions = (filters = {}) => {
+    const params = Object.fromEntries(
+        Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== "")
+    );
+    return api.get("/questions", { params }).then((r) => r.data);
+};
+// Mismos filtros; devuelve { ids, total, capped } para "practicar esta selección"
+export const listQuestionIds = (filters = {}) => {
+    const { sort, page, limit, ...rest } = filters; // /ids ignora paginación/orden
+    const params = Object.fromEntries(
+        Object.entries(rest).filter(([, v]) => v !== undefined && v !== null && v !== "")
+    );
+    return api.get("/questions/ids", { params }).then((r) => r.data);
+};
+
 // Questions
 export const toggleFavorite = (qid) => api.post(`/questions/${qid}/favorite`).then((r) => r.data);
 export const toggleDifficult = (qid) => api.post(`/questions/${qid}/difficult`).then((r) => r.data);

@@ -100,6 +100,14 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 
 Frontend: **`PdfPicker`** (selector presentacional de PDFs, todos preseleccionados) reutilizado por `GenerateDialog` (preguntas) y por **`PdfSelectDialog`** (resumen y flashcards). UX: con **≤1 PDF** se genera directo (un clic, sin fricción); con **>1 PDF** se abre el selector. Durante la generación se muestra feedback claro (spinner + "puede tardar hasta ~1 min") porque son varias llamadas a IA.
 
+**Banco de preguntas (listado global reutilizable):**
+- `GET /api/questions` — listado paginado del usuario con filtros: `subject_id`, `topic_id`, `pdf_source_id` (o `"none"` = sin PDF de origen), `question_type`, `status` (`all|errors|favorites|difficult|unpracticed|mastered|due`), `q` (búsqueda en enunciado, regex sin índice de texto), `sort` (`recent|most_failed`), `page`, `limit` (def. 30, máx. 100). Devuelve `{ items, total, page, limit }`.
+- `GET /api/questions/ids` — mismos filtros; devuelve `{ ids, total, capped }` para "practicar esta selección". `ids` capado a `QUESTIONS_IDS_CAP` (500) pero `total` es el **real** y `capped` avisa si hay más (la UI muestra "practicando 500 de 800"; **sin recortes silenciosos**).
+- `POST /api/quiz/start` acepta `question_ids` opcional: si viene, el pool son esas preguntas (acotadas por `user_id`, ignora filtros de modo). Reutiliza el flujo `quiz/run`→`results`.
+- Helper compartido `_questions_query(...)`. Índices `(user_id, created_at)` y `(user_id, question_type)`.
+
+Frontend: pantalla **Banco de preguntas** en `/preguntas` (`frontend/src/pages/QuestionBank.jsx`, entrada "Preguntas" en el nav). Filtros + buscador + chips de estado; tarjetas con favorito/difícil, editar (`EditQuestionDialog`, PATCH `/questions/{id}`), ir al tema, borrar; botón "Practicar selección" (usa `/questions/ids` → `quiz/start` con `question_ids`, avisa si `capped`).
+
 **Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me`.
 
 Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`). La creación de temas usa **`CreateTopicDialog`** (`frontend/src/components/CreateTopicDialog.jsx`): pide solo el nombre y, de forma **opcional**, adjunta PDFs (subir nuevos y/o elegir de la biblioteca) sin generar preguntas. Dentro del tema, `AddPdfDialog` sube/vincula PDFs y `GenerateDialog` genera las preguntas aparte. (El antiguo `UploadDialog`, que obligaba a subir PDF + generar al crear, se eliminó.)
@@ -129,6 +137,7 @@ Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **web
 - **Límites de uso de IA** por plan (`check_and_consume_ai_quota` antes de cada llamada a Gemini; 402 al superar).
 - **Pagos con Paddle (Billing v4)**: checkout con Paddle.js, webhook firmado, customer portal, cancelación programada reflejada en `/cuenta`.
 - **PDFs muchos-a-muchos + biblioteca** (Fases 1-3): un PDF se reutiliza en varios temas; pantalla `/biblioteca` para subir/gestionar PDFs sin tema.
+- **Banco de preguntas** (`/preguntas`): listado global de todas las preguntas del usuario con filtros (asignatura/tema/PDF/tipo/estado), buscador y "practicar esta selección".
 
 ## Qué falta / pendiente ❌
 

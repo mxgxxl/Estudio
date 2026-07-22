@@ -1650,6 +1650,129 @@ async def delete_question(question_id: str, current_user: dict = Depends(get_cur
     return {"ok": True}
 
 
+# ---- Banco de preguntas (listado global con filtros) ----
+# Cap de ids devueltos por /questions/ids: es el tamaño máximo de pool
+# "practicable" de una vez. Si el filtro tiene más, se avisa en la UI con el
+# total real (nada de recortes silenciosos).
+QUESTIONS_IDS_CAP = 500
+
+_QUESTION_STATUSES = ("all", "errors", "favorites", "difficult", "unpracticed", "mastered", "due")
+
+
+def _questions_query(uid: str, *, subject_id=None, topic_id=None, pdf_source_id=None,
+                     question_type=None, status="all", q=None) -> dict:
+    """Construye el filtro Mongo del banco de preguntas (siempre por user_id).
+
+    Compartido por GET /questions y GET /questions/ids para no duplicar lógica.
+    """
+    query: dict = {"user_id": uid}
+    if subject_id:
+        query["subject_id"] = subject_id
+    if topic_id:
+        query["topic_id"] = topic_id
+    if pdf_source_id:
+        # "none" = preguntas cuyo PDF de origen se borró/desvinculó (pdf_source_id None).
+        query["pdf_source_id"] = None if pdf_source_id == "none" else pdf_source_id
+    if question_type in ("mcq", "tf", "dev"):
+        query["question_type"] = question_type
+
+    if status == "errors":
+        query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
+    elif status == "favorites":
+        query["favorite"] = True
+    elif status == "difficult":
+        query["difficult"] = True
+    elif status == "unpracticed":
+        query["times_answered"] = 0
+    elif status == "mastered":
+        # Todo acertado y practicada al menos una vez.
+        query["times_answered"] = {"$gt": 0}
+        query["$expr"] = {"$eq": ["$times_answered", "$times_correct"]}
+    elif status == "due":
+        query["srs_next_review"] = {"$lte": _now_iso()}
+        query["times_answered"] = {"$gt": 0}
+
+    if q and q.strip():
+        # Búsqueda por subcadena en el enunciado (regex escapada, sin distinguir
+        # mayúsculas). Sin índice de texto: escaneo del subconjunto del usuario.
+        query["question"] = {"$regex": re.escape(q.strip()), "$options": "i"}
+    return query
+
+
+@api.get("/questions")
+async def list_questions(
+    subject_id: Optional[str] = None,
+    topic_id: Optional[str] = None,
+    pdf_source_id: Optional[str] = None,
+    question_type: Optional[str] = None,
+    status: str = "all",
+    q: Optional[str] = None,
+    sort: str = "recent",
+    page: int = 1,
+    limit: int = 30,
+    current_user: dict = Depends(get_current_user),
+):
+    """Banco de preguntas: listado global del usuario con filtros y paginación."""
+    uid = current_user["id"]
+    if status not in _QUESTION_STATUSES:
+        status = "all"
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
+
+    query = _questions_query(
+        uid, subject_id=subject_id, topic_id=topic_id, pdf_source_id=pdf_source_id,
+        question_type=question_type, status=status, q=q,
+    )
+
+    total = await db.questions.count_documents(query)
+    # "más falladas" primero (fallos absolutos = answered - correct), luego reciente.
+    sort_spec = [("created_at", -1)] if sort != "most_failed" else [
+        ("times_answered", -1), ("created_at", -1)
+    ]
+    cursor = (
+        db.questions.find(query, {"_id": 0})
+        .sort(sort_spec)
+        .skip((page - 1) * limit)
+        .limit(limit)
+    )
+    items = await cursor.to_list(limit)
+    return {"items": items, "total": total, "page": page, "limit": limit}
+
+
+@api.get("/questions/ids")
+async def list_question_ids(
+    subject_id: Optional[str] = None,
+    topic_id: Optional[str] = None,
+    pdf_source_id: Optional[str] = None,
+    question_type: Optional[str] = None,
+    status: str = "all",
+    q: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """IDs de todas las preguntas del filtro (para 'practicar esta selección').
+
+    Devuelve como mucho QUESTIONS_IDS_CAP ids, pero SIEMPRE el `total` real y
+    `capped` para que la UI avise ("practicando 500 de 800"), sin recortes
+    silenciosos.
+    """
+    uid = current_user["id"]
+    if status not in _QUESTION_STATUSES:
+        status = "all"
+    query = _questions_query(
+        uid, subject_id=subject_id, topic_id=topic_id, pdf_source_id=pdf_source_id,
+        question_type=question_type, status=status, q=q,
+    )
+    total = await db.questions.count_documents(query)
+    rows = await (
+        db.questions.find(query, {"_id": 0, "id": 1})
+        .sort([("created_at", -1)])
+        .limit(QUESTIONS_IDS_CAP)
+        .to_list(QUESTIONS_IDS_CAP)
+    )
+    ids = [r["id"] for r in rows]
+    return {"ids": ids, "total": total, "capped": total > len(ids)}
+
+
 # ---- Development question evaluation ----
 class EvalDevReq(BaseModel):
     question_id: str
@@ -1688,27 +1811,37 @@ class QuizStartReq(BaseModel):
     time_limit_minutes: Optional[int] = None
     question_type: Optional[Literal["mcq", "tf", "dev", "any"]] = "any"
     num_options: Optional[int] = None
+    # "Practicar esta selección" del banco: si viene, el pool son EXACTAMENTE
+    # estas preguntas (del usuario); se ignoran los filtros de modo/asignatura.
+    question_ids: Optional[List[str]] = None
 
 
 @api.post("/quiz/start")
 async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
     query: dict = {"user_id": current_user["id"]}
-    if req.subject_ids:
-        query["subject_id"] = {"$in": req.subject_ids}
-    if req.topic_ids:
-        query["topic_id"] = {"$in": req.topic_ids}
-    if req.question_type and req.question_type != "any":
-        query["question_type"] = req.question_type
-    if req.num_options:
-        query["num_options"] = int(req.num_options)
 
-    if req.mode == "errors":
-        query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
-    elif req.mode == "favorites":
-        query["favorite"] = True
-    elif req.mode == "srs":
-        now = _now_iso()
-        query["srs_next_review"] = {"$lte": now}
+    if req.question_ids:
+        # Pool explícito (banco de preguntas). Se acota siempre por user_id.
+        query["id"] = {"$in": req.question_ids}
+        if req.question_type and req.question_type != "any":
+            query["question_type"] = req.question_type
+    else:
+        if req.subject_ids:
+            query["subject_id"] = {"$in": req.subject_ids}
+        if req.topic_ids:
+            query["topic_id"] = {"$in": req.topic_ids}
+        if req.question_type and req.question_type != "any":
+            query["question_type"] = req.question_type
+        if req.num_options:
+            query["num_options"] = int(req.num_options)
+
+        if req.mode == "errors":
+            query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
+        elif req.mode == "favorites":
+            query["favorite"] = True
+        elif req.mode == "srs":
+            now = _now_iso()
+            query["srs_next_review"] = {"$lte": now}
 
     questions = await db.questions.find(query, {"_id": 0}).to_list(5000)
     if not questions:
@@ -2671,6 +2804,9 @@ async def ensure_indices():
         await db.questions.create_index([("user_id", 1), ("subject_id", 1)])
         await db.questions.create_index([("user_id", 1), ("topic_id", 1)])
         await db.questions.create_index([("user_id", 1), ("pdf_source_id", 1)])
+        # Banco de preguntas: orden por reciente y filtro por tipo (con user_id).
+        await db.questions.create_index([("user_id", 1), ("created_at", -1)])
+        await db.questions.create_index([("user_id", 1), ("question_type", 1)])
         # Attempts
         await db.attempts.create_index("id", unique=True)
         await db.attempts.create_index([("created_at", -1)])
