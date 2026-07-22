@@ -1119,6 +1119,30 @@ async def get_topic_text(topic_id: str, current_user: dict = Depends(get_current
     return {"topic_id": topic_id, "text": "\n\n".join(parts), "sources": [p["filename"] for p in pdfs]}
 
 
+class CreateTopicReq(BaseModel):
+    name: str
+
+
+@api.post("/subjects/{subject_id}/topics")
+async def create_topic(
+    subject_id: str,
+    req: CreateTopicReq,
+    current_user: dict = Depends(get_current_user),
+):
+    """Crea un tema VACÍO (sin PDF). No llama a Gemini → no consume cuota.
+    Los PDFs y la generación de preguntas se añaden luego dentro del tema."""
+    uid = current_user["id"]
+    subj = await db.subjects.find_one({"id": subject_id, "user_id": uid}, {"_id": 0})
+    if not subj:
+        raise HTTPException(status_code=404, detail="Asignatura no encontrada")
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="El nombre del tema es obligatorio")
+    topic = Topic(user_id=uid, subject_id=subject_id, name=name)
+    await db.topics.insert_one(topic.model_dump())
+    return topic.model_dump()
+
+
 @api.post("/subjects/{subject_id}/topics/upload")
 async def upload_topic_pdf(
     subject_id: str,

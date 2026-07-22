@@ -79,6 +79,10 @@ una sola vez en `pdfs` (ahorra espacio en Atlas M0 al no duplicar). Reglas clave
 
 Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm`, `POST /api/diag/llm-test`. Recursos: subjects, topics, pdfs, questions, quiz (`start`/`submit`/`eval-dev`), stats (incl. `by-subject`, `by-topic`, `gaps`), flashcards, survival, summary. El frontend los consume desde `frontend/src/lib/api.js`.
 
+**Temas (creación desacoplada de los PDFs):**
+- `POST /api/subjects/{subject_id}/topics` — crea un tema **vacío** (solo `name`, JSON). No toca `pdfs`/`pdf_links`, **no llama a Gemini** → sin cuota. Es el camino que usa la UI para crear temas.
+- `POST /api/subjects/{subject_id}/topics/upload` — **(legacy)** crea tema + PDF + genera preguntas en un solo paso (multipart, consume cuota). Ya **no se usa desde el frontend**; se conserva por compatibilidad y porque lo cubren los tests.
+
 **PDFs / biblioteca (Fases 1-3):**
 - `GET /api/pdfs` — biblioteca del usuario: todos sus PDFs (sin `text`) con `link_count` y `topic_ids`.
 - `POST /api/pdfs` — sube un PDF a la biblioteca SIN tema (`link_count 0`). No llama a Gemini → sin cuota.
@@ -90,7 +94,7 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 
 **Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me`.
 
-Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`).
+Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`). La creación de temas usa **`CreateTopicDialog`** (`frontend/src/components/CreateTopicDialog.jsx`): pide solo el nombre y, de forma **opcional**, adjunta PDFs (subir nuevos y/o elegir de la biblioteca) sin generar preguntas. Dentro del tema, `AddPdfDialog` sube/vincula PDFs y `GenerateDialog` genera las preguntas aparte. (El antiguo `UploadDialog`, que obligaba a subir PDF + generar al crear, se eliminó.)
 
 ## Pagos / Suscripciones (Paddle Billing v4)
 
@@ -108,7 +112,7 @@ Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **web
 
 ## Qué funciona ya ✅
 
-- CRUD de asignaturas y temas; subida de PDF y almacenamiento del texto extraído.
+- CRUD de asignaturas y temas; **crear temas vacíos** (sin PDF) y adjuntarles PDFs (nuevos o de la biblioteca) cuando se quiera. La subida de PDF y la generación de preguntas están desacopladas de la creación del tema.
 - Generación con IA de preguntas (MCQ 2-5 opciones, V/F, desarrollo), flashcards y resúmenes desde el temario.
 - Regenerar preguntas desde un PDF en cualquier momento.
 - Cuestionarios con modos (examen, práctica, errores, SRS, favoritos), penalización y nota /10.

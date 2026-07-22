@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { getSubject, listSubjectTopics, deleteTopic } from "@/lib/api";
-import UploadDialog from "@/components/UploadDialog";
+import CreateTopicDialog from "@/components/CreateTopicDialog";
 
 export default function SubjectDetail() {
     const { id } = useParams();
@@ -115,7 +115,7 @@ export default function SubjectDetail() {
                     data-testid="add-topic-btn"
                     className="btn-primary flex items-center gap-2 text-sm"
                 >
-                    <Plus className="w-4 h-4" /> Nuevo tema (PDF)
+                    <Plus className="w-4 h-4" /> Nuevo tema
                 </button>
             </div>
 
@@ -124,14 +124,14 @@ export default function SubjectDetail() {
                     <BookOpen className="w-10 h-10 mx-auto mb-3" style={{ color: subject.color || "var(--brand)" }} />
                     <h3 className="font-display text-xl font-bold">No hay temas en esta asignatura</h3>
                     <p className="mt-1 text-sm" style={{ color: "var(--text-muted)" }}>
-                        Sube tu primer PDF y empezamos a generar preguntas.
+                        Crea tu primer tema. Podrás añadir PDFs y generar preguntas cuando quieras.
                     </p>
                     <button
                         onClick={() => setUploadOpen(true)}
                         data-testid="empty-add-topic-btn"
                         className="btn-primary mt-5 inline-flex items-center gap-2"
                     >
-                        <Plus className="w-4 h-4" /> Subir PDF
+                        <Plus className="w-4 h-4" /> Nuevo tema
                     </button>
                 </div>
             ) : (
@@ -186,7 +186,7 @@ export default function SubjectDetail() {
                 </div>
             )}
 
-            <UploadDialog
+            <CreateTopicDialog
                 open={uploadOpen}
                 onClose={() => setUploadOpen(false)}
                 onCreated={load}

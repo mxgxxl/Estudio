@@ -84,13 +84,9 @@ export const deleteTopic = (id) => api.delete(`/topics/${id}`).then((r) => r.dat
 export const getTopicQuestions = (id) => api.get(`/topics/${id}/questions`).then((r) => r.data);
 export const getTopicPdfs = (id) => api.get(`/topics/${id}/pdfs`).then((r) => r.data);
 
-export const uploadTopic = (subjectId, formData) =>
-    api
-        .post(`/subjects/${subjectId}/topics/upload`, formData, {
-            headers: { "Content-Type": "multipart/form-data" },
-            timeout: 300000,
-        })
-        .then((r) => r.data);
+// Crea un tema vacío (sin PDF, sin generar preguntas → sin cuota de IA)
+export const createTopic = (subjectId, data) =>
+    api.post(`/subjects/${subjectId}/topics`, data).then((r) => r.data);
 
 // PDFs
 export const regenerateFromPdf = (pdfId, payload) =>
