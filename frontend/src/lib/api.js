@@ -105,6 +105,13 @@ export const addPdfToTopic = (topicId, formData) =>
         .then((r) => r.data);
 // Biblioteca de PDFs del usuario (para reutilizar en varios temas)
 export const listPdfs = () => api.get("/pdfs").then((r) => r.data);
+export const uploadPdf = (formData) =>
+    api
+        .post("/pdfs", formData, {
+            headers: { "Content-Type": "multipart/form-data" },
+            timeout: 120000,
+        })
+        .then((r) => r.data);
 export const linkPdfToTopic = (topicId, pdfId) =>
     api.post(`/topics/${topicId}/pdfs/${pdfId}/link`).then((r) => r.data);
 export const unlinkPdfFromTopic = (topicId, pdfId) =>
