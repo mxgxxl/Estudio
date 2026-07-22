@@ -92,6 +92,20 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 
 Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`).
 
+## Pagos / Suscripciones (Paddle Billing v4)
+
+Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **webhooks firmados** en el backend. El plan (`premium`/`free`) se **deriva siempre** del estado de la suscripción (única fuente de verdad; helper `_plan_for_subscription_status`).
+
+**Campos en `users`:** `plan`, `subscription_status` (`free`|`active`|`trialing`|`canceled`|`past_due`), `paddle_customer_id`, `paddle_subscription_id`, `subscription_current_period_end`, y **`subscription_scheduled_change`** (objeto `{action, effective_at, ...}` o `None`) — cuando `action == "cancel"` hay una **cancelación programada** a fin de periodo; `GET /billing/status` lo expone como `cancel_scheduled` y `/cuenta` muestra "se cancelará el …" manteniendo premium hasta `current_period_end`.
+
+**Checkout:** `POST /billing/checkout` devuelve `price_id`, `customer_email` y `user_id`; el frontend abre el overlay inyectando **`custom_data: { user_id }`** para poder emparejar el webhook por ID propio.
+
+**Webhook (`POST /api/webhooks/paddle`):** verifica la firma HMAC-SHA256 (cabecera `Paddle-Signature`, `ts:body`), es idempotente por `event_id` (colección `paddle_events`), y **localiza al usuario en este orden**: 1) `custom_data.user_id` (validado contra `users`), 2) `paddle_subscription_id`, 3) `paddle_customer_id`, 4) **email** (del payload o resuelto vía API de Paddle por `customer_id`). Procesa `subscription.*` (activa/actualiza/cancela y guarda ids + `current_period_end` + `scheduled_change`) y `transaction.completed` (informativo). Si no encuentra usuario, responde 200 (log) para que Paddle no reintente.
+
+**Gestión/cancelación:** `POST /billing/portal` crea una **customer portal session** de Paddle (`POST /customers/{id}/portal-sessions`, bajo demanda, nunca cacheada) y devuelve el deep link `cancel_subscription` (fallback al overview). La cancelación la resuelve Paddle; el webhook `subscription.*` sincroniza el estado. Errores claros: 409 si no hay `paddle_customer_id`, 502 (con log) si falla la API / faltan permisos.
+
+**Variables de entorno** — backend: `PADDLE_ENV` (`sandbox`|`production`), `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_PREMIUM_PRICE_ID`. Frontend: `REACT_APP_PADDLE_CLIENT_TOKEN`, `REACT_APP_PADDLE_ENV`, `REACT_APP_PADDLE_PREMIUM_PRICE_ID`. La API key necesita el permiso *Customer portal sessions (Write)* para `/billing/portal`.
+
 ## Qué funciona ya ✅
 
 - CRUD de asignaturas y temas; subida de PDF y almacenamiento del texto extraído.
