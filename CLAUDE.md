@@ -46,8 +46,27 @@ test_reports/          # resultados pytest por iteración
 ```
 
 ### Modelo de datos (colecciones MongoDB)
-`subjects`, `topics`, `pdfs` (texto extraído), `questions`, `attempts`, `flashcards`, `survival_records`.
+`subjects`, `topics`, `pdfs` (texto extraído), `pdf_links`, `questions`, `attempts`, `flashcards`, `survival_records`, `paddle_events`.
 Las preguntas soportan `question_type` = `mcq` | `tf` | `dev`, penalización configurable y campos SRS (SM-2 simplificado).
+
+**PDFs muchos-a-muchos (Fases 1-3).** Un PDF ya NO está atado a un tema: existe como
+entidad independiente y se asocia a varios temas/asignaturas mediante la colección
+intermedia **`pdf_links`** `{user_id, pdf_id, topic_id, subject_id}` (índice único
+`(user_id, pdf_id, topic_id)`; `subject_id` desnormalizado del topic). El texto vive
+una sola vez en `pdfs` (ahorra espacio en Atlas M0 al no duplicar). Reglas clave:
+- Toda lectura de "los PDFs de un tema" pasa por el helper `_topic_pdf_ids(uid, topic_id)`
+  (lee de `pdf_links`).
+- **Cascada con orfandad**: al borrar un tema/asignatura o desvincular, el documento
+  `pdfs` se borra SOLO si no le queda ningún vínculo (`_delete_pdf_if_orphan`). Un PDF de
+  biblioteca con `link_count 0` es estable y seguro (ninguna cascada lo toca).
+- Al borrar/desvincular un PDF, sus preguntas NO se borran: solo pierden la referencia
+  (`pdf_source_id = None`).
+- **Migración**: `backend/scripts/migrate_pdf_links.py` (aditiva, idempotente, `DRY_RUN=1`)
+  crea `pdf_links` desde el antiguo `pdfs.topic_id`.
+- ⚠️ **TODO-FASE3 pendiente** (buscar `TODO-FASE3` en `server.py`): retirar `pdfs.topic_id`
+  (hoy `Optional`, conservado solo para rollback) y los **fallbacks transitorios** que leen
+  por `topic_id` cuando un PDF aún no tiene vínculos (en `_topic_pdf_ids`, `regenerate` y
+  `unlink`). Hacerlo solo cuando la migración esté garantizada en todos los entornos.
 
 ### Variables de entorno
 - Backend (base): `MONGO_URL`, `DB_NAME`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CORS_ORIGINS`, `LOG_LEVEL` (por defecto `INFO`; súbelo a `DEBUG` para ver las trazas rutinarias, p. ej. las de Paddle).
@@ -60,6 +79,19 @@ Las preguntas soportan `question_type` = `mcq` | `tf` | `dev`, penalización con
 
 Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm`, `POST /api/diag/llm-test`. Recursos: subjects, topics, pdfs, questions, quiz (`start`/`submit`/`eval-dev`), stats (incl. `by-subject`, `by-topic`, `gaps`), flashcards, survival, summary. El frontend los consume desde `frontend/src/lib/api.js`.
 
+**PDFs / biblioteca (Fases 1-3):**
+- `GET /api/pdfs` — biblioteca del usuario: todos sus PDFs (sin `text`) con `link_count` y `topic_ids`.
+- `POST /api/pdfs` — sube un PDF a la biblioteca SIN tema (`link_count 0`). No llama a Gemini → sin cuota.
+- `POST /api/topics/{topic_id}/pdfs/upload` — sube un PDF y lo vincula al tema (crea `pdfs` + `pdf_links`).
+- `POST /api/topics/{topic_id}/pdfs/{pdf_id}/link` — asocia un PDF existente a un tema (idempotente).
+- `DELETE /api/topics/{topic_id}/pdfs/{pdf_id}` — desvincula del tema; borra el PDF si era su último vínculo (`{ok, pdf_deleted}`).
+- `DELETE /api/pdfs/{pdf_id}` — borra el PDF por completo (de todos los temas) y desliga sus preguntas.
+- `GET /api/topics/{id}/pdfs` incluye `link_count` por PDF.
+
+**Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me`.
+
+Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`).
+
 ## Qué funciona ya ✅
 
 - CRUD de asignaturas y temas; subida de PDF y almacenamiento del texto extraído.
@@ -67,14 +99,16 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 - Regenerar preguntas desde un PDF en cualquier momento.
 - Cuestionarios con modos (examen, práctica, errores, SRS, favoritos), penalización y nota /10.
 - Repaso espaciado, flashcards, modo supervivencia, estadísticas y detector de lagunas.
+- **Autenticación** (registro/login/JWT) y **multiusuario real** (todo filtrado por `user_id`).
+- **Límites de uso de IA** por plan (`check_and_consume_ai_quota` antes de cada llamada a Gemini; 402 al superar).
+- **Pagos con Paddle (Billing v4)**: checkout con Paddle.js, webhook firmado, customer portal, cancelación programada reflejada en `/cuenta`.
+- **PDFs muchos-a-muchos + biblioteca** (Fases 1-3): un PDF se reutiliza en varios temas; pantalla `/biblioteca` para subir/gestionar PDFs sin tema.
 
-## Qué falta ❌ (el trabajo del SaaS)
+## Qué falta / pendiente ❌
 
-1. **Autenticación**: no hay registro/login/JWT. Las libs están instaladas pero `server.py` no las usa.
-2. **Multiusuario**: ninguna colección tiene `user_id`; todas las consultas son globales. **Hoy todos los datos son compartidos.**
-3. **Límites de IA**: no se comprueba ningún plan ni cuota antes de llamar a Gemini.
-4. **Pagos**: integrados con **Paddle (Billing v4)** — checkout con Paddle.js y webhook firmado en `/api/webhooks/paddle` que activa/desactiva el plan premium.
-5. **Frontend**: no hay pantallas de auth, ni de plan/suscripción, ni gating por límites.
+1. **TODO-FASE3 de PDFs** (ver arriba): retirar `pdfs.topic_id` y los fallbacks transitorios una vez la migración `pdf_links` esté consolidada en todos los entornos.
+2. Mejoras de biblioteca no incluidas: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
+3. (Histórico) El SaaS base —auth, multiusuario, límites de IA, pagos— ya está implementado; ver "Qué funciona ya".
 
 ## Reglas obligatorias
 
