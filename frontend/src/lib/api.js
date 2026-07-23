@@ -141,10 +141,13 @@ export const deleteQuestion = (qid) => api.delete(`/questions/${qid}`).then((r) 
 export const quizStart = (payload) => api.post("/quiz/start", payload).then((r) => r.data);
 export const quizSubmit = (payload) => api.post("/quiz/submit", payload).then((r) => r.data);
 
-// Stats
-export const getStats = () => api.get("/stats").then((r) => r.data);
-export const getStatsBySubject = () => api.get("/stats/by-subject").then((r) => r.data);
-export const getStatsByTopic = () => api.get("/stats/by-topic").then((r) => r.data);
+// Stats — con timeout explícito: si una petición se queda colgada (conexión
+// cortada sin respuesta), axios la rechaza en vez de dejar la sección en blanco
+// para siempre. La UI muestra entonces el error + "Reintentar".
+const STATS_TIMEOUT = 15000;
+export const getStats = () => api.get("/stats", { timeout: STATS_TIMEOUT }).then((r) => r.data);
+export const getStatsBySubject = () => api.get("/stats/by-subject", { timeout: STATS_TIMEOUT }).then((r) => r.data);
+export const getStatsByTopic = () => api.get("/stats/by-topic", { timeout: STATS_TIMEOUT }).then((r) => r.data);
 
 // Questions edit
 export const editQuestion = (qid, data) => api.patch(`/questions/${qid}`, data).then((r) => r.data);
@@ -188,4 +191,4 @@ export const generateTopicSummary = (topicId, pdfIds = null) =>
         .then((r) => r.data);
 
 // Gap detector
-export const getKnowledgeGaps = () => api.get("/stats/gaps").then((r) => r.data);
+export const getKnowledgeGaps = () => api.get("/stats/gaps", { timeout: STATS_TIMEOUT }).then((r) => r.data);

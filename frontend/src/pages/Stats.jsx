@@ -119,7 +119,12 @@ export default function Stats() {
             </section>
 
             {/* Gap detector */}
-            {gaps.error ? (
+            {gaps.loading ? (
+                <section className="mb-10">
+                    <span className="label-eyebrow block mb-3">Lagunas detectadas</span>
+                    <SectionLoading />
+                </section>
+            ) : gaps.error ? (
                 <section className="mb-10"><SectionError onRetry={() => load("gaps")} /></section>
             ) : gaps.data?.weak_topics?.length > 0 && (
                 <section className="mb-10">
@@ -154,7 +159,12 @@ export default function Stats() {
             )}
 
             {/* By subject - mapa de progreso */}
-            {bySubject.error ? (
+            {bySubject.loading ? (
+                <section className="mb-10">
+                    <span className="label-eyebrow block mb-3">Por asignatura</span>
+                    <SectionLoading />
+                </section>
+            ) : bySubject.error ? (
                 <section className="mb-10"><SectionError onRetry={() => load("bySubject")} /></section>
             ) : bySubject.data?.length > 0 && (
                 <section className="mb-10">
@@ -179,7 +189,12 @@ export default function Stats() {
             )}
 
             {/* By topic - mapa de progreso con colores */}
-            {byTopic.error ? (
+            {byTopic.loading ? (
+                <section className="mb-10">
+                    <span className="label-eyebrow block mb-3">Mapa de progreso por tema</span>
+                    <SectionLoading />
+                </section>
+            ) : byTopic.error ? (
                 <section className="mb-10"><SectionError onRetry={() => load("byTopic")} /></section>
             ) : byTopic.data?.length > 0 && (
                 <section className="mb-10">
