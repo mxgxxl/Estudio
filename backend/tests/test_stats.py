@@ -187,3 +187,38 @@ def test_isolation(client, data):
     assert s["total_subjects"] == 1 and s["total_questions"] == 1
     subs = _get(client, hb, "/api/stats/by-subject")
     assert {r["subject_id"] for r in subs} == {"stat_sx"}
+
+
+def test_gaps_with_unanswered_questions(client, srv):
+    """Regresión: /stats/gaps rompía con un 500 cuando había preguntas SIN
+    responder (times_answered=0) junto a otras respondidas.
+
+    En Mongo real el $expr con $divide por times_answered se evaluaba en el
+    escaneo sin cortocircuitar el filtro times_answered>2, provocando
+    "can't $divide by zero" en las preguntas sin responder (el caso del usuario:
+    21 preguntas, 10 respondidas). La comparación sin división (2*ok < ans) lo
+    evita. (mongomock no reproduce el error de división, pero este test fija el
+    comportamiento correcto y el 200 con ese dataset.)
+    """
+    uid = _register_id(client, "gaps_bug@x.com")
+    h = _login(client, "gaps_bug@x.com")
+    _subj(srv, uid, "gap_s", "Asig")
+    _topic(srv, uid, "gap_t", "gap_s", "Tema")
+
+    # Sin responder (las que rompían el endpoint).
+    _q(srv, uid, "gap_unanswered1", "gap_s", "gap_t", ans=0, ok=0)
+    _q(srv, uid, "gap_unanswered2", "gap_s", "gap_t", ans=0, ok=0)
+    # Practicada pero <=2 respuestas: fuera del pool (aunque 0%).
+    _q(srv, uid, "gap_low", "gap_s", "gap_t", ans=2, ok=0)
+    # Débiles (<50% y >2 respuestas).
+    _q(srv, uid, "gap_weak_a", "gap_s", "gap_t", ans=4, ok=1)   # 25%
+    _q(srv, uid, "gap_weak_b", "gap_s", "gap_t", ans=5, ok=1)   # 20%
+    # Justo 50%: NO es débil (umbral estricto <0.5).
+    _q(srv, uid, "gap_half", "gap_s", "gap_t", ans=4, ok=2)     # 50%
+    # Dominada.
+    _q(srv, uid, "gap_good", "gap_s", "gap_t", ans=5, ok=5)     # 100%
+
+    r = client.get("/api/stats/gaps", headers=h)
+    assert r.status_code == 200, r.text  # antes: 500
+    g = r.json()
+    assert {q["id"] for q in g["weak_questions"]} == {"gap_weak_a", "gap_weak_b"}

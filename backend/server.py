@@ -3027,7 +3027,13 @@ async def get_knowledge_gaps(current_user: dict = Depends(get_current_user)):
             {"$group": {"_id": "$topic_id", "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}, "total": {"$sum": 1}}},
         ]).to_list(None),
         db.questions.find(
-            {"user_id": uid, "times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
+            # Preguntas con <50% de acierto. Se compara SIN dividir
+            # (2*ok < ans  ⟺  ok/ans < 0.5) para evitar el "can't $divide by
+            # zero" de Mongo: el $expr se evalúa en el escaneo sin garantía de
+            # cortocircuitar times_answered>2, así que dividir por times_answered
+            # rompía con las preguntas sin responder (times_answered=0).
+            {"user_id": uid, "times_answered": {"$gt": 2},
+             "$expr": {"$lt": [{"$multiply": ["$times_correct", 2]}, "$times_answered"]}},
             {"_id": 0, "id": 1, "question": 1, "topic_name": 1, "times_answered": 1, "times_correct": 1}
         ).sort([("times_answered", -1)]).to_list(20),
     )
