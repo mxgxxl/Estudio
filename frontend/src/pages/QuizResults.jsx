@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
+import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { toast } from "sonner";
+import { quizStart } from "@/lib/api";
 
 function DevReviewCard({ question, devScore }) {
     const [showModel, setShowModel] = useState(false);
@@ -49,6 +51,7 @@ function DevReviewCard({ question, devScore }) {
 export default function QuizResults() {
     const navigate = useNavigate();
     const [data, setData] = useState(null);
+    const [reviewing, setReviewing] = useState(false);
 
     useEffect(() => {
         const raw = sessionStorage.getItem("quiz_result");
@@ -73,6 +76,50 @@ export default function QuizResults() {
 
     const pct = total ? Math.round((correct / total) * 100) : 0;
     const passed = score_10 >= 5;
+
+    // Preguntas NO acertadas en ESTE examen: fallos + en blanco (sel === -1) +
+    // desarrollo con nota < 5. Es la base del botón "Repasar errores".
+    const failedIds = questions
+        .filter((q, i) =>
+            q.question_type === "dev"
+                ? (devScores[q.id] ?? 0) < 5
+                : answers[i] !== q.correct_index
+        )
+        .map((q) => q.id);
+
+    // Lanza un quiz de práctica solo con las preguntas falladas ahora, reusando
+    // quiz/start + question_ids (mismo patrón que "Practicar selección" del banco).
+    const reviewErrors = async () => {
+        if (!failedIds.length) return;
+        setReviewing(true);
+        try {
+            const res = await quizStart({
+                mode: "practice",
+                question_ids: failedIds,
+                num_questions: failedIds.length,
+            });
+            const qs = res.questions || [];
+            if (!qs.length) {
+                toast.error("No se pudieron cargar las preguntas para repasar");
+                return;
+            }
+            sessionStorage.setItem("current_quiz", JSON.stringify({
+                questions: qs,
+                mode: "practice",
+                subject_ids: [],
+                topic_ids: [],
+                time_limit_seconds: null,
+                penalty_factor: null,
+                question_type: "any",
+                started_at: Date.now(),
+            }));
+            navigate("/quiz/run");
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "No se pudo iniciar el repaso");
+        } finally {
+            setReviewing(false);
+        }
+    };
 
     // Separate questions by type for the summary
     const devQuestions = questions.filter(q => q.question_type === "dev");
@@ -151,14 +198,22 @@ export default function QuizResults() {
                 <Link to="/" className="btn-primary inline-flex items-center gap-2" data-testid="back-home-btn">
                     <Home className="w-4 h-4" /> Inicio
                 </Link>
-                <Link
-                    to="/quiz/setup?mode=errors"
-                    data-testid="review-errors-btn"
-                    className="px-5 py-2.5 rounded-md border font-medium text-sm flex items-center gap-2 hover:bg-[color:var(--bg-secondary)]"
-                    style={{ borderColor: "var(--border)" }}
-                >
-                    <RotateCcw className="w-4 h-4" /> Repasar errores
-                </Link>
+                {/* Solo si hay algo que repasar: un botón gris "deshabilitado"
+                    invitaría a preguntarse por qué no funciona; ocultarlo comunica
+                    mejor que el examen fue perfecto. */}
+                {failedIds.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={reviewErrors}
+                        disabled={reviewing}
+                        data-testid="review-errors-btn"
+                        className="px-5 py-2.5 rounded-md border font-medium text-sm flex items-center gap-2 hover:bg-[color:var(--bg-secondary)] disabled:opacity-60"
+                        style={{ borderColor: "var(--border)" }}
+                    >
+                        {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                        Repasar errores ({failedIds.length})
+                    </button>
+                )}
                 <Link
                     to="/quiz/setup"
                     className="px-5 py-2.5 rounded-md border font-medium text-sm flex items-center gap-2 hover:bg-[color:var(--bg-secondary)]"
