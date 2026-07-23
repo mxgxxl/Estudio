@@ -1,10 +1,17 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
     BarChart3, BookOpen, Target, Clock, Star, Flame,
-    Brain, FolderOpen, AlertTriangle, History, Zap,
+    Brain, FolderOpen, AlertTriangle, Zap, Loader2, RotateCcw,
 } from "lucide-react";
 import { getStats, getStatsBySubject, getStatsByTopic, getKnowledgeGaps } from "@/lib/api";
+
+const FETCHERS = {
+    overview: getStats,
+    bySubject: getStatsBySubject,
+    byTopic: getStatsByTopic,
+    gaps: getKnowledgeGaps,
+};
 
 const Tile = ({ label, value, icon: Icon, hint }) => (
     <div className="card-organic p-5">
@@ -29,25 +36,56 @@ function AccuracyBar({ accuracy, color }) {
     );
 }
 
-export default function Stats() {
-    const [stats, setStats] = useState(null);
-    const [bySubject, setBySubject] = useState([]);
-    const [byTopic, setByTopic] = useState([]);
-    const [gaps, setGaps] = useState(null);
+// Fallo aislado de una sección: mensaje + reintento, sin tocar el resto.
+function SectionError({ onRetry }) {
+    return (
+        <div className="card-organic p-5 flex items-center justify-between gap-3" data-testid="section-error">
+            <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                No se pudo cargar esta sección.
+            </span>
+            <button
+                onClick={onRetry}
+                className="px-3 py-1.5 rounded-md border text-xs font-medium flex items-center gap-1.5 hover:bg-[color:var(--bg-secondary)]"
+                style={{ borderColor: "var(--border)" }}
+            >
+                <RotateCcw className="w-3.5 h-3.5" /> Reintentar
+            </button>
+        </div>
+    );
+}
 
-    useEffect(() => {
-        Promise.all([getStats(), getStatsBySubject(), getStatsByTopic(), getKnowledgeGaps()])
-            .then(([s, b, t, g]) => {
-                setStats(s);
-                setBySubject(b);
-                setByTopic(t);
-                setGaps(g);
-            });
+function SectionLoading() {
+    return (
+        <div className="card-organic p-6 flex items-center gap-2 text-sm" style={{ color: "var(--text-muted)" }}>
+            <Loader2 className="w-4 h-4 animate-spin" /> Cargando…
+        </div>
+    );
+}
+
+export default function Stats() {
+    // Cada sección tiene su propio estado: carga y fallo son independientes.
+    const [sec, setSec] = useState(() =>
+        Object.fromEntries(Object.keys(FETCHERS).map((k) => [k, { data: null, loading: true, error: false }]))
+    );
+
+    const load = useCallback((key) => {
+        setSec((s) => ({ ...s, [key]: { ...s[key], loading: true, error: false } }));
+        return FETCHERS[key]()
+            .then((d) => setSec((s) => ({ ...s, [key]: { data: d, loading: false, error: false } })))
+            .catch(() => setSec((s) => ({ ...s, [key]: { data: null, loading: false, error: true } })));
     }, []);
 
-    if (!stats) return (
-        <div className="max-w-5xl mx-auto px-5 md:px-8 py-10" style={{ color: "var(--text-muted)" }}>Cargando…</div>
-    );
+    useEffect(() => {
+        // Las 4 secciones se lanzan a la vez y cada una se pinta EN CUANTO llega
+        // (allSettled: el fallo de una no bloquea ni borra las demás).
+        Promise.allSettled(Object.keys(FETCHERS).map(load));
+    }, [load]);
+
+    const overview = sec.overview;
+    const o = overview.data;
+    const bySubject = sec.bySubject;
+    const byTopic = sec.byTopic;
+    const gaps = sec.gaps;
 
     return (
         <div className="max-w-5xl mx-auto px-5 md:px-8 py-8 md:py-12">
@@ -55,19 +93,35 @@ export default function Stats() {
             <h1 className="font-display text-3xl md:text-4xl font-bold mt-1 mb-8">Tu progreso</h1>
 
             {/* Global stats */}
-            <section className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
-                <Tile label="Asignaturas" value={stats.total_subjects} icon={FolderOpen} />
-                <Tile label="Temas" value={stats.total_topics} icon={BookOpen} />
-                <Tile label="Preguntas" value={stats.total_questions} icon={Target} />
-                <Tile label="Precisión" value={`${stats.accuracy}%`} icon={BarChart3} hint={`${stats.answered_total} respuestas`} />
-                <Tile label="Intentos" value={stats.total_attempts} icon={Clock} />
-                <Tile label="Favoritas" value={stats.favorites} icon={Star} />
-                <Tile label="Errores pendientes" value={stats.errors_pool} icon={Flame} />
-                <Tile label="Repaso SRS" value={stats.due_srs} icon={Brain} hint="Pendientes hoy" />
+            <section className="mb-10">
+                {overview.loading ? (
+                    <SectionLoading />
+                ) : overview.error ? (
+                    <SectionError onRetry={() => load("overview")} />
+                ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <Tile label="Asignaturas" value={o.total_subjects} icon={FolderOpen} />
+                        <Tile label="Temas" value={o.total_topics} icon={BookOpen} />
+                        <Tile label="Preguntas" value={o.total_questions} icon={Target} />
+                        <Tile label="Precisión" value={`${o.accuracy}%`} icon={BarChart3} hint={`${o.answered_total} respuestas`} />
+                        <Tile label="Intentos" value={o.total_attempts} icon={Clock} />
+                        <Tile label="Favoritas" value={o.favorites} icon={Star} />
+                        <Tile label="Errores pendientes" value={o.errors_pool} icon={Flame} />
+                        <Tile label="Repaso SRS" value={o.due_srs} icon={Brain} hint="Pendientes hoy" />
+                    </div>
+                )}
+                {!overview.loading && !overview.error && o.streak > 0 && (
+                    <div className="mt-3 text-sm flex items-center gap-2" style={{ color: "var(--text-secondary)" }}>
+                        <Flame className="w-4 h-4" style={{ color: "var(--warning)" }} />
+                        Racha de <strong>{o.streak}</strong> {o.streak === 1 ? "día" : "días"}
+                    </div>
+                )}
             </section>
 
             {/* Gap detector */}
-            {gaps?.weak_topics?.length > 0 && (
+            {gaps.error ? (
+                <section className="mb-10"><SectionError onRetry={() => load("gaps")} /></section>
+            ) : gaps.data?.weak_topics?.length > 0 && (
                 <section className="mb-10">
                     <div className="flex items-center gap-2 mb-3">
                         <AlertTriangle className="w-4 h-4" style={{ color: "var(--error)" }} />
@@ -77,7 +131,7 @@ export default function Stats() {
                         Temas con menos del 60% de aciertos (mín. 3 respuestas por pregunta):
                     </p>
                     <div className="card-organic divide-y" style={{ borderColor: "var(--border)" }}>
-                        {gaps.weak_topics.map(t => (
+                        {gaps.data.weak_topics.map(t => (
                             <Link key={t.topic_id} to={`/quiz/setup?topic=${t.topic_id}&mode=practice`}
                                 className="flex items-center justify-between gap-3 p-4 hover:bg-[color:var(--bg-secondary)]">
                                 <div className="flex-1 min-w-0">
@@ -100,11 +154,13 @@ export default function Stats() {
             )}
 
             {/* By subject - mapa de progreso */}
-            {bySubject.length > 0 && (
+            {bySubject.error ? (
+                <section className="mb-10"><SectionError onRetry={() => load("bySubject")} /></section>
+            ) : bySubject.data?.length > 0 && (
                 <section className="mb-10">
                     <span className="label-eyebrow block mb-3">Por asignatura</span>
                     <div className="card-organic divide-y" style={{ borderColor: "var(--border)" }}>
-                        {bySubject.map(row => (
+                        {bySubject.data.map(row => (
                             <Link key={row.subject_id} to={`/asignaturas/${row.subject_id}`}
                                 className="flex items-center gap-3 p-4 hover:bg-[color:var(--bg-secondary)]"
                                 data-testid={`subject-row-${row.subject_id}`}>
@@ -123,7 +179,9 @@ export default function Stats() {
             )}
 
             {/* By topic - mapa de progreso con colores */}
-            {byTopic.length > 0 && (
+            {byTopic.error ? (
+                <section className="mb-10"><SectionError onRetry={() => load("byTopic")} /></section>
+            ) : byTopic.data?.length > 0 && (
                 <section className="mb-10">
                     <span className="label-eyebrow block mb-1">Mapa de progreso por tema</span>
                     <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
@@ -132,7 +190,7 @@ export default function Stats() {
                         <span style={{ color: "var(--error)" }}>■</span> Repasar &lt;50%
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
-                        {byTopic.map(row => {
+                        {byTopic.data.map(row => {
                             const color = row.accuracy >= 70 ? "var(--sage)" : row.accuracy >= 50 ? "var(--warning)" : "var(--error)";
                             const bg = row.accuracy >= 70 ? "#eef2ec" : row.accuracy >= 50 ? "#fdf5e6" : "#fbeeee";
                             return (
@@ -157,19 +215,19 @@ export default function Stats() {
 
             {/* Actions */}
             <section className="flex flex-wrap gap-3 mb-10">
-<Link to="/supervivencia"
+                <Link to="/supervivencia"
                     className="px-4 py-2.5 rounded-md border font-medium text-sm flex items-center gap-2 hover:bg-[color:var(--bg-secondary)]"
                     style={{ borderColor: "var(--border)" }}>
                     <Zap className="w-4 h-4" /> Modo supervivencia
                 </Link>
             </section>
 
-            {/* Last attempts */}
-            {stats.last_attempts?.length > 0 && (
+            {/* Last attempts (parte del overview) */}
+            {!overview.loading && !overview.error && o.last_attempts?.length > 0 && (
                 <section>
                     <span className="label-eyebrow block mb-3">Últimos 3 intentos</span>
                     <div className="card-organic divide-y" style={{ borderColor: "var(--border)" }}>
-                        {stats.last_attempts.map(a => (
+                        {o.last_attempts.map(a => (
                             <div key={a.id} className="flex items-center justify-between p-4">
                                 <div>
                                     <div className="font-medium text-sm capitalize">{a.mode}{a.penalty_factor && (

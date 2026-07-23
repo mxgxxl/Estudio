@@ -2025,44 +2025,56 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
 
 
 # ---- Stats ----
+def _current_streak(streak_days: List[str]) -> int:
+    """Racha de días consecutivos con actividad hasta hoy, calculada en memoria.
+
+    Antes se hacía un count_documents por día en un bucle (hasta 365 viajes a
+    Atlas). Ahora se recibe la lista de días con intentos (una sola consulta
+    `distinct`) y se cuentan los consecutivos desde hoy hacia atrás."""
+    days = {d for d in streak_days if d}
+    streak = 0
+    check = datetime.now(timezone.utc).date()
+    while check.isoformat() in days:
+        streak += 1
+        check -= timedelta(days=1)
+    return streak
+
+
 @api.get("/stats")
 async def stats_overview(current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
-    total_subjects = await db.subjects.count_documents({"user_id": uid})
-    total_topics = await db.topics.count_documents({"user_id": uid})
-    total_questions = await db.questions.count_documents({"user_id": uid})
-    total_attempts = await db.attempts.count_documents({"user_id": uid})
+    now = _now_iso()
 
-    agg = await db.questions.aggregate([
-        {"$match": {"user_id": uid}},
-        {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
-    ]).to_list(1)
+    # Todas las consultas son independientes → se lanzan en paralelo (una sola
+    # tanda) en vez de ~10 viajes secuenciales a Atlas.
+    (
+        total_subjects, total_topics, total_questions, total_attempts,
+        agg, favorites, difficult, errors_pool, due_srs,
+        streak_days, last_attempts,
+    ) = await asyncio.gather(
+        db.subjects.count_documents({"user_id": uid}),
+        db.topics.count_documents({"user_id": uid}),
+        db.questions.count_documents({"user_id": uid}),
+        db.attempts.count_documents({"user_id": uid}),
+        db.questions.aggregate([
+            {"$match": {"user_id": uid}},
+            {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
+        ]).to_list(1),
+        db.questions.count_documents({"user_id": uid, "favorite": True}),
+        db.questions.count_documents({"user_id": uid, "difficult": True}),
+        db.questions.count_documents({"user_id": uid, "$expr": {"$gt": ["$times_answered", "$times_correct"]}}),
+        db.questions.count_documents({"user_id": uid, "srs_next_review": {"$lte": now}, "times_answered": {"$gt": 0}}),
+        db.attempts.distinct("streak_day", {"user_id": uid}),
+        db.attempts.find({"user_id": uid}, {"_id": 0}).sort("created_at", -1).to_list(3),
+    )
+
     accuracy = 0.0
     answered = 0
     if agg and agg[0]["ans"]:
         accuracy = round(100 * agg[0]["ok"] / agg[0]["ans"], 1)
         answered = agg[0]["ans"]
 
-    favorites = await db.questions.count_documents({"user_id": uid, "favorite": True})
-    difficult = await db.questions.count_documents({"user_id": uid, "difficult": True})
-    errors_pool = await db.questions.count_documents({"user_id": uid, "$expr": {"$gt": ["$times_answered", "$times_correct"]}})
-    now = _now_iso()
-    due_srs = await db.questions.count_documents({"user_id": uid, "srs_next_review": {"$lte": now}, "times_answered": {"$gt": 0}})
-
-    # Streak calculation
-    today = datetime.now(timezone.utc).date()
-    streak = 0
-    check_date = today
-    for _ in range(365):
-        day_str = check_date.isoformat()
-        count = await db.attempts.count_documents({"user_id": uid, "streak_day": day_str})
-        if count > 0:
-            streak += 1
-            check_date = check_date - timedelta(days=1)
-        else:
-            break
-
-    last_attempts = await db.attempts.find({"user_id": uid}, {"_id": 0}).sort("created_at", -1).to_list(3)
+    streak = _current_streak(streak_days)
 
     return {
         "total_subjects": total_subjects,
@@ -2080,83 +2092,72 @@ async def stats_overview(current_user: dict = Depends(get_current_user)):
     }
 
 
+def _group_stats_by(field: str):
+    """Pipeline de agregación que agrupa las preguntas del usuario por `field`
+    (subject_id o topic_id) y suma respuestas/aciertos/total en UNA consulta."""
+    return [
+        {"$group": {
+            "_id": f"${field}",
+            "ans": {"$sum": "$times_answered"},
+            "ok": {"$sum": "$times_correct"},
+            "total": {"$sum": 1},
+        }},
+    ]
+
+
 @api.get("/stats/by-subject")
 async def stats_by_subject(current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
-    subjects = await db.subjects.find({"user_id": uid}, {"_id": 0}).to_list(1000)
+    # 2 consultas fijas (antes: 1 + una agregación por asignatura, N+1).
+    subjects, agg = await asyncio.gather(
+        db.subjects.find({"user_id": uid}, {"_id": 0}).to_list(1000),
+        db.questions.aggregate(
+            [{"$match": {"user_id": uid}}, *_group_stats_by("subject_id")]
+        ).to_list(None),
+    )
+    by_id = {r["_id"]: r for r in agg}
     out = []
     for s in subjects:
-        agg = await db.questions.aggregate([
-            {"$match": {"user_id": uid, "subject_id": s["id"]}},
-            {"$group": {
-                "_id": None,
-                "ans": {"$sum": "$times_answered"},
-                "ok": {"$sum": "$times_correct"},
-                "total": {"$sum": 1},
-            }},
-        ]).to_list(1)
-        if agg:
-            row = agg[0]
-            accuracy = round(100 * row["ok"] / row["ans"], 1) if row["ans"] else 0.0
-            out.append({
-                "subject_id": s["id"],
-                "subject_name": s["name"],
-                "color": s.get("color", "#C65D47"),
-                "total_questions": row["total"],
-                "answered": row["ans"],
-                "correct": row["ok"],
-                "accuracy": accuracy,
-            })
-        else:
-            out.append({
-                "subject_id": s["id"],
-                "subject_name": s["name"],
-                "color": s.get("color", "#C65D47"),
-                "total_questions": 0,
-                "answered": 0,
-                "correct": 0,
-                "accuracy": 0.0,
-            })
+        row = by_id.get(s["id"])
+        ans = row["ans"] if row else 0
+        ok = row["ok"] if row else 0
+        out.append({
+            "subject_id": s["id"],
+            "subject_name": s["name"],
+            "color": s.get("color", "#C65D47"),
+            "total_questions": row["total"] if row else 0,
+            "answered": ans,
+            "correct": ok,
+            "accuracy": round(100 * ok / ans, 1) if ans else 0.0,
+        })
     return out
 
 
 @api.get("/stats/by-topic")
 async def stats_by_topic(current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
-    topics = await db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000)
+    # 2 consultas fijas (antes: 1 + una agregación por tema, N+1).
+    topics, agg = await asyncio.gather(
+        db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000),
+        db.questions.aggregate(
+            [{"$match": {"user_id": uid}}, *_group_stats_by("topic_id")]
+        ).to_list(None),
+    )
+    by_id = {r["_id"]: r for r in agg}
     out = []
     for t in topics:
-        agg = await db.questions.aggregate([
-            {"$match": {"user_id": uid, "topic_id": t["id"]}},
-            {"$group": {
-                "_id": None,
-                "ans": {"$sum": "$times_answered"},
-                "ok": {"$sum": "$times_correct"},
-                "total": {"$sum": 1},
-            }},
-        ]).to_list(1)
-        if agg:
-            row = agg[0]
-            accuracy = round(100 * row["ok"] / row["ans"], 1) if row["ans"] else 0.0
-            out.append({
-                "topic_id": t["id"],
-                "topic_name": t["name"],
-                "subject_id": t.get("subject_id"),
-                "total_questions": row["total"],
-                "answered": row["ans"],
-                "correct": row["ok"],
-                "accuracy": accuracy,
-            })
-        else:
-            out.append({
-                "topic_id": t["id"],
-                "topic_name": t["name"],
-                "subject_id": t.get("subject_id"),
-                "total_questions": 0,
-                "answered": 0,
-                "correct": 0,
-                "accuracy": 0.0,
-            })
+        row = by_id.get(t["id"])
+        ans = row["ans"] if row else 0
+        ok = row["ok"] if row else 0
+        out.append({
+            "topic_id": t["id"],
+            "topic_name": t["name"],
+            "subject_id": t.get("subject_id"),
+            "total_questions": row["total"] if row else 0,
+            "answered": ans,
+            "correct": ok,
+            "accuracy": round(100 * ok / ans, 1) if ans else 0.0,
+        })
     return out
 
 
@@ -3017,30 +3018,39 @@ TEMARIO:
 async def get_knowledge_gaps(current_user: dict = Depends(get_current_user)):
     """Identify topics and questions with accuracy below 60%."""
     uid = current_user["id"]
-    topics = await db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000)
-    weak_topics = []
-    for t in topics:
-        agg = await db.questions.aggregate([
-            {"$match": {"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 2}}},
-            {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}, "total": {"$sum": 1}}},
-        ]).to_list(1)
-        if agg and agg[0]["ans"] > 0:
-            accuracy = round(100 * agg[0]["ok"] / agg[0]["ans"], 1)
-            if accuracy < 60:
-                weak_topics.append({
-                    "topic_id": t["id"],
-                    "topic_name": t["name"],
-                    "subject_id": t.get("subject_id"),
-                    "accuracy": accuracy,
-                    "answered": agg[0]["ans"],
-                    "total_questions": agg[0]["total"],
-                })
+    # 3 consultas fijas (antes: 1 + una agregación por tema, N+1): temas,
+    # agregación por tema de las preguntas practicadas, y preguntas débiles.
+    topics, agg, weak_questions = await asyncio.gather(
+        db.topics.find({"user_id": uid}, {"_id": 0}).to_list(2000),
+        db.questions.aggregate([
+            {"$match": {"user_id": uid, "times_answered": {"$gt": 2}}},
+            {"$group": {"_id": "$topic_id", "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}, "total": {"$sum": 1}}},
+        ]).to_list(None),
+        db.questions.find(
+            {"user_id": uid, "times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
+            {"_id": 0, "id": 1, "question": 1, "topic_name": 1, "times_answered": 1, "times_correct": 1}
+        ).sort([("times_answered", -1)]).to_list(20),
+    )
 
-    # Also get weakest individual questions
-    weak_questions = await db.questions.find(
-        {"user_id": uid, "times_answered": {"$gt": 2}, "$expr": {"$lt": [{"$divide": ["$times_correct", "$times_answered"]}, 0.5]}},
-        {"_id": 0, "id": 1, "question": 1, "topic_name": 1, "times_answered": 1, "times_correct": 1}
-    ).sort([("times_answered", -1)]).to_list(20)
+    tmap = {t["id"]: t for t in topics}
+    weak_topics = []
+    for r in agg:
+        if r["ans"] <= 0:
+            continue
+        accuracy = round(100 * r["ok"] / r["ans"], 1)
+        if accuracy >= 60:
+            continue
+        t = tmap.get(r["_id"])
+        if not t:
+            continue
+        weak_topics.append({
+            "topic_id": t["id"],
+            "topic_name": t["name"],
+            "subject_id": t.get("subject_id"),
+            "accuracy": accuracy,
+            "answered": r["ans"],
+            "total_questions": r["total"],
+        })
 
     for q in weak_questions:
         q["accuracy"] = round(100 * q["times_correct"] / q["times_answered"], 1) if q["times_answered"] else 0
