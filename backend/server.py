@@ -407,6 +407,28 @@ def _parse_llm_response(raw: str, question_type: str, num_options: int) -> List[
     return cleaned
 
 
+def _log_gemini_usage(operation: str, response) -> None:
+    """Loguea (INFO) el consumo de tokens de una respuesta de Gemini, etiquetado
+    por tipo de operación, para poder dimensionar límites y coste real. El SDK
+    google-genai expone response.usage_metadata (prompt/candidates/total token
+    count). Solo logging; nunca debe romper la petición."""
+    try:
+        um = getattr(response, "usage_metadata", None)
+        if um is None:
+            logger.info("[GEMINI-USAGE] op=%s tokens=unavailable model=%s", operation, GEMINI_MODEL)
+            return
+        logger.info(
+            "[GEMINI-USAGE] op=%s in=%s out=%s total=%s model=%s",
+            operation,
+            getattr(um, "prompt_token_count", None),
+            getattr(um, "candidates_token_count", None),
+            getattr(um, "total_token_count", None),
+            GEMINI_MODEL,
+        )
+    except Exception as e:  # pragma: no cover - el logging jamás debe fallar la petición
+        logger.warning("[GEMINI-USAGE] op=%s no se pudo leer usage_metadata: %s", operation, e)
+
+
 async def _call_gemini(system_msg: str, user_prompt: str) -> str:
     logger.info("[LLM-CALL] provider=gemini model=%s prompt_chars=%s", GEMINI_MODEL, len(user_prompt))
     if gemini_client is None:
@@ -421,6 +443,7 @@ async def _call_gemini(system_msg: str, user_prompt: str) -> str:
                 temperature=0.7,
             ),
         )
+        _log_gemini_usage("generate_questions", response)
         text = response.text or ""
     except Exception as e:
         logger.error("[LLM-CALL-FAIL] provider=gemini exc=%s detail=%s", type(e).__name__, str(e)[:500])
@@ -560,6 +583,7 @@ Devuelve SOLO este JSON:
                 temperature=0.3,
             ),
         )
+        _log_gemini_usage("eval_dev", response)
         raw = _strip_code_fences(response.text or "")
         result = json.loads(raw)
         return result
@@ -2361,6 +2385,7 @@ TEMARIO:
                 temperature=0.5,
             ),
         )
+        _log_gemini_usage("flashcards", response)
         raw = _strip_code_fences(response.text or "")
         data = json.loads(raw)
         if not isinstance(data, list):
@@ -3099,6 +3124,7 @@ TEMARIO:
                 temperature=0.3,
             ),
         )
+        _log_gemini_usage("summary", response)
         raw = _strip_code_fences(response.text or "")
         summary = json.loads(raw)
         return summary
