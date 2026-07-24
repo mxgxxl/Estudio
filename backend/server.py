@@ -417,11 +417,14 @@ def _log_gemini_usage(operation: str, response) -> None:
         if um is None:
             logger.info("[GEMINI-USAGE] op=%s tokens=unavailable model=%s", operation, GEMINI_MODEL)
             return
+        # thoughts_token_count = tokens de razonamiento (thinking) de
+        # gemini-2.5-flash; explican el descuadre in+out vs total.
         logger.info(
-            "[GEMINI-USAGE] op=%s in=%s out=%s total=%s model=%s",
+            "[GEMINI-USAGE] op=%s in=%s out=%s thoughts=%s total=%s model=%s",
             operation,
             getattr(um, "prompt_token_count", None),
             getattr(um, "candidates_token_count", None),
+            getattr(um, "thoughts_token_count", None),
             getattr(um, "total_token_count", None),
             GEMINI_MODEL,
         )

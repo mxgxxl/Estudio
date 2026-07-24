@@ -22,7 +22,8 @@ def srv():
 class _UM:
     prompt_token_count = 48213
     candidates_token_count = 1204
-    total_token_count = 49417
+    thoughts_token_count = 2235
+    total_token_count = 51652
 
 
 class _Resp:
@@ -44,7 +45,8 @@ def test_logs_tokens_when_available(srv, caplog):
         srv._log_gemini_usage("generate_questions", _Resp())
     line = next(r.getMessage() for r in caplog.records if "GEMINI-USAGE" in r.getMessage())
     assert "op=generate_questions" in line
-    assert "in=48213" in line and "out=1204" in line and "total=49417" in line
+    assert "in=48213" in line and "out=1204" in line
+    assert "thoughts=2235" in line and "total=51652" in line
 
 
 def test_unavailable_metadata_does_not_break(srv, caplog):
