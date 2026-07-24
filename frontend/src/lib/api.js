@@ -18,13 +18,17 @@ api.interceptors.request.use((config) => {
     return config;
 });
 
-// Detecta las URLs de acciones que consumen cuota de IA (para refrescar el
-// contador tras una generación correcta).
-const AI_GEN_URL_RE = /(\/topics\/upload|\/regenerate|\/generate|\/summary|\/eval-dev)$/;
+// Detecta las URLs de acciones que consumen cuota de IA —generaciones y
+// correcciones— para refrescar el contador de la cabecera tras una acción
+// correcta. `eval-dev(-batch)?` cubre la corrección individual (práctica) y la
+// del envío de examen (batch); esta última no casaba y por eso la cabecera no
+// se actualizaba sola al terminar un examen con preguntas de desarrollo.
+const AI_GEN_URL_RE = /(\/topics\/upload|\/regenerate|\/generate|\/summary|\/eval-dev(-batch)?)$/;
 
 api.interceptors.response.use(
     (r) => {
-        // Tras una generación de IA correcta, avisa para refrescar el contador.
+        // Tras una acción de IA correcta (genera o corrige), avisa para refrescar
+        // el contador (refreshUsage recarga ambos: generaciones y correcciones).
         const method = (r?.config?.method || "").toLowerCase();
         const url = r?.config?.url || "";
         if (method === "post" && AI_GEN_URL_RE.test(url)) {
