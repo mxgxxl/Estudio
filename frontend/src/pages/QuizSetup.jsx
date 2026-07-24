@@ -22,6 +22,14 @@ const QTYPES = [
     { id: "dev", label: "Desarrollo (IA evalúa)" },
 ];
 
+// Preguntas disponibles en un tema para el tipo elegido. "any" = todas; en otro
+// caso usa el desglose counts_by_type que ahora devuelve el backend (con
+// fallback a 0 si un tema aún no lo trae).
+const availOf = (t, questionType) =>
+    questionType === "any"
+        ? (t.question_count || 0)
+        : ((t.counts_by_type || {})[questionType] || 0);
+
 const PENALTIES = [
     { id: 0, label: "Sin penalización" },
     { id: 1, label: "1 mal = −1 bien" },
@@ -31,7 +39,7 @@ const PENALTIES = [
 ];
 
 // Panel de distribución de preguntas por tema
-function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQuestions, mode }) {
+function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQuestions, mode, questionType }) {
     const total = Object.values(topicQuestions).reduce((a, b) => a + b, 0);
     const diff = totalQuestions - total;
 
@@ -44,7 +52,7 @@ function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQue
     };
 
     const setByWeight = () => {
-        const totalQ = topics.reduce((a, t) => a + (t.question_count || 0), 0);
+        const totalQ = topics.reduce((a, t) => a + availOf(t, questionType), 0);
         if (!totalQ) return setEqual();
         let assigned = 0;
         const next = {};
@@ -52,7 +60,7 @@ function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQue
             if (i === topics.length - 1) {
                 next[t.id] = Math.max(1, totalQuestions - assigned);
             } else {
-                const n = Math.max(1, Math.round((t.question_count / totalQ) * totalQuestions));
+                const n = Math.max(1, Math.round((availOf(t, questionType) / totalQ) * totalQuestions));
                 next[t.id] = n;
                 assigned += n;
             }
@@ -80,7 +88,7 @@ function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQue
                 {topics.map((t) => {
                     const val = topicQuestions[t.id] ?? 0;
                     const pct = totalQuestions > 0 ? Math.round((val / totalQuestions) * 100) : 0;
-                    const available = t.question_count || 0;
+                    const available = availOf(t, questionType);
                     return (
                         <div key={t.id} className="px-4 py-3">
                             <div className="flex items-center justify-between mb-2">
@@ -212,10 +220,20 @@ export default function QuizSetup() {
         return visibleTopics.filter((t) => selectedTopics.has(t.id));
     }, [visibleTopics, selectedTopics]);
 
+    // Disponibles para el TIPO elegido (no todos los tipos): así un examen de
+    // desarrollo no ofrece un número que no existe ni acaba en 404.
     const totalAvailable = useMemo(
-        () => activeTopics.reduce((a, t) => a + (t.question_count || 0), 0),
-        [activeTopics]
+        () => activeTopics.reduce((a, t) => a + availOf(t, questionType), 0),
+        [activeTopics, questionType]
     );
+
+    // Al cambiar la disponibilidad (p. ej. al pasar a "Desarrollo", que suele
+    // tener pocas), ajusta el nº pedido para no exceder lo que hay.
+    useEffect(() => {
+        if (totalAvailable > 0) {
+            setNumQuestions((n) => Math.min(Math.max(1, n), totalAvailable));
+        }
+    }, [totalAvailable]);
 
     // Sync distribution when numQuestions or activeTopics change
     useEffect(() => {
@@ -290,9 +308,10 @@ export default function QuizSetup() {
 
     const showDistributionToggle = activeTopics.length > 1 && ["practice", "exam"].includes(mode);
     const distributionTotal = Object.values(topicQuestions).reduce((a, b) => a + b, 0);
-    const canStart = useDistribution && showDistributionToggle
-        ? distributionTotal > 0
-        : totalAvailable > 0;
+    // Siempre exige que haya preguntas del tipo elegido; y si hay distribución
+    // manual, que se haya repartido al menos una.
+    const canStart = totalAvailable > 0
+        && (useDistribution && showDistributionToggle ? distributionTotal > 0 : true);
 
     return (
         <div className="max-w-4xl mx-auto px-5 md:px-8 py-8 md:py-12">
@@ -431,7 +450,9 @@ export default function QuizSetup() {
                 <div className="flex items-center justify-between mb-2">
                     <span className="label-eyebrow">
                         Nº de preguntas: <span className="font-mono">{numQuestions}</span>{" "}
-                        <span className="font-mono" style={{ color: "var(--text-muted)" }}>(disponibles: {totalAvailable})</span>
+                        <span className="font-mono" style={{ color: "var(--text-muted)" }}>
+                            (disponibles: {totalAvailable}{questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""})
+                        </span>
                     </span>
                     {showDistributionToggle && (
                         <button
@@ -450,13 +471,24 @@ export default function QuizSetup() {
                 </div>
                 <input
                     type="range"
-                    min="5"
-                    max={Math.max(50, Math.min(totalAvailable, 100))}
+                    min="1"
+                    max={Math.max(1, Math.min(totalAvailable, 100))}
                     value={numQuestions}
                     onChange={(e) => setNumQuestions(parseInt(e.target.value))}
+                    disabled={totalAvailable === 0}
                     data-testid="num-questions-range"
-                    className="w-full accent-[color:var(--brand)] mb-4"
+                    className="w-full accent-[color:var(--brand)] mb-4 disabled:opacity-50"
                 />
+                {totalAvailable === 0 && (
+                    <div
+                        className="text-xs flex items-start gap-2 p-2 rounded-md mb-2"
+                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                        data-testid="no-questions-of-type"
+                    >
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
+                        No hay preguntas{questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""} en la selección. Genera alguna desde el tema o cambia el tipo.
+                    </div>
+                )}
 
                 {/* Panel de distribución */}
                 {useDistribution && showDistributionToggle && (
@@ -466,6 +498,7 @@ export default function QuizSetup() {
                         setTopicQuestions={setTopicQuestions}
                         totalQuestions={numQuestions}
                         mode={mode}
+                        questionType={questionType}
                     />
                 )}
             </div>

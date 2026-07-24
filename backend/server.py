@@ -1049,6 +1049,27 @@ async def delete_subject(subject_id: str, current_user: dict = Depends(get_curre
     return {"ok": True}
 
 
+async def _counts_by_type(uid: str, topic_ids: Optional[List[str]] = None) -> dict:
+    """Preguntas por tema desglosadas por tipo, en UNA agregación.
+    Devuelve { topic_id: {"mcq": n, "tf": n, "dev": n} }. Lo usa QuizSetup para
+    mostrar disponibilidad por tipo y no proponer un examen dev que no existe."""
+    match: dict = {"user_id": uid}
+    if topic_ids is not None:
+        match["topic_id"] = {"$in": topic_ids}
+    rows = await db.questions.aggregate([
+        {"$match": match},
+        {"$group": {"_id": {"topic_id": "$topic_id", "qt": "$question_type"}, "n": {"$sum": 1}}},
+    ]).to_list(None)
+    out: dict = {}
+    for r in rows:
+        tid = r["_id"]["topic_id"]
+        qt = r["_id"]["qt"]
+        d = out.setdefault(tid, {"mcq": 0, "tf": 0, "dev": 0})
+        if qt in d:
+            d[qt] += r["n"]
+    return out
+
+
 @api.get("/subjects/{subject_id}/topics")
 async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
@@ -1056,6 +1077,7 @@ async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(
     if not s:
         raise HTTPException(status_code=404, detail="Asignatura no encontrada")
     topics = await db.topics.find({"subject_id": subject_id, "user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    cbt = await _counts_by_type(uid, [t["id"] for t in topics])
     for t in topics:
         t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"]})
         t["answered_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 0}})
@@ -1065,6 +1087,7 @@ async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(
         ]).to_list(1)
         t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
         t["pdf_count"] = len(await _topic_pdf_ids(uid, t["id"]))
+        t["counts_by_type"] = cbt.get(t["id"], {"mcq": 0, "tf": 0, "dev": 0})
     return topics
 
 
@@ -1073,6 +1096,7 @@ async def list_topics_for_subject(subject_id: str, current_user: dict = Depends(
 async def list_topics(current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
     topics = await db.topics.find({"user_id": uid}, {"_id": 0}).sort("created_at", 1).to_list(2000)
+    cbt = await _counts_by_type(uid, [t["id"] for t in topics])
     for t in topics:
         t["question_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"]})
         t["answered_count"] = await db.questions.count_documents({"user_id": uid, "topic_id": t["id"], "times_answered": {"$gt": 0}})
@@ -1081,6 +1105,7 @@ async def list_topics(current_user: dict = Depends(get_current_user)):
             {"$group": {"_id": None, "ans": {"$sum": "$times_answered"}, "ok": {"$sum": "$times_correct"}}},
         ]).to_list(1)
         t["accuracy"] = round(100 * agg[0]["ok"] / agg[0]["ans"], 1) if agg and agg[0]["ans"] else 0.0
+        t["counts_by_type"] = cbt.get(t["id"], {"mcq": 0, "tf": 0, "dev": 0})
     return topics
 
 

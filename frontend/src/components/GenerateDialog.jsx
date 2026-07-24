@@ -96,10 +96,11 @@ export default function GenerateDialog({ open, onClose, onDone, topic, pdfs, def
 
                     <div>
                         <label className="label-eyebrow block mb-1.5">Tipo</label>
-                        <div className="grid grid-cols-2 gap-2">
+                        <div className="grid grid-cols-3 gap-2">
                             {[
                                 { id: "mcq", label: "Opción múltiple" },
                                 { id: "tf", label: "Verdadero/Falso" },
+                                { id: "dev", label: "Desarrollo" },
                             ].map((t) => (
                                 <button
                                     key={t.id}
