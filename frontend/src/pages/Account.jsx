@@ -138,10 +138,28 @@ export default function Account() {
                             </div>
                         )}
                         {usage && (
-                            <div className="flex justify-between">
-                                <dt style={{ color: "var(--text-muted)" }}>Generaciones de IA este mes</dt>
-                                <dd className="font-medium">{usage.used} / {usage.limit}</dd>
-                            </div>
+                            <>
+                                <div className="flex justify-between">
+                                    <dt style={{ color: "var(--text-muted)" }}>Generaciones de IA este mes</dt>
+                                    <dd className="font-medium">
+                                        {(usage.generations?.used ?? usage.used)} / {(usage.generations?.limit ?? usage.limit)}
+                                    </dd>
+                                </div>
+                                <div className="flex justify-between">
+                                    <dt style={{ color: "var(--text-muted)" }}>Correcciones de IA este mes</dt>
+                                    <dd className="font-medium">
+                                        {(usage.corrections?.used ?? 0)} / {(usage.corrections?.limit ?? 0)}
+                                    </dd>
+                                </div>
+                                {usage.days_until_reset != null && (
+                                    <div className="flex justify-between">
+                                        <dt style={{ color: "var(--text-muted)" }}>Se renueva en</dt>
+                                        <dd className="font-medium">
+                                            {usage.days_until_reset} día{usage.days_until_reset === 1 ? "" : "s"}
+                                        </dd>
+                                    </div>
+                                )}
+                            </>
                         )}
                     </dl>
                 )}

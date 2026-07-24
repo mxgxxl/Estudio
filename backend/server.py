@@ -56,7 +56,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 
 # Configurables por variable de entorno; valores por defecto razonables.
 FREE_AI_GENERATIONS_PER_MONTH = int(os.environ.get("FREE_AI_GENERATIONS_PER_MONTH", "30"))
 PREMIUM_AI_GENERATIONS_PER_MONTH = int(os.environ.get("PREMIUM_AI_GENERATIONS_PER_MONTH", "2000"))
-# Duración del periodo: mes natural rodante de 30 días.
+# Correcciones (evaluar respuestas de desarrollo). Contador aparte, mucho más
+# barato por unidad que una generación → límites más holgados.
+FREE_AI_CORRECTIONS_PER_MONTH = int(os.environ.get("FREE_AI_CORRECTIONS_PER_MONTH", "300"))
+PREMIUM_AI_CORRECTIONS_PER_MONTH = int(os.environ.get("PREMIUM_AI_CORRECTIONS_PER_MONTH", "5000"))
+# Duración del periodo: mes natural rodante de 30 días (compartido por ambos).
 AI_PERIOD_DAYS = 30
 
 # Paddle (Billing v4) — pasarela de pagos. Por defecto en sandbox.
@@ -82,8 +86,9 @@ logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 logger.info("[LLM-DIAG] provider=gemini model=%s GEMINI_API_KEY_present=%s", GEMINI_MODEL, bool(GEMINI_API_KEY))
 logger.info(
-    "[AI-LIMITS] free=%s/mes premium=%s/mes period_days=%s",
-    FREE_AI_GENERATIONS_PER_MONTH, PREMIUM_AI_GENERATIONS_PER_MONTH, AI_PERIOD_DAYS,
+    "[AI-LIMITS] generations free=%s/mes premium=%s/mes | corrections free=%s/mes premium=%s/mes | period_days=%s",
+    FREE_AI_GENERATIONS_PER_MONTH, PREMIUM_AI_GENERATIONS_PER_MONTH,
+    FREE_AI_CORRECTIONS_PER_MONTH, PREMIUM_AI_CORRECTIONS_PER_MONTH, AI_PERIOD_DAYS,
 )
 logger.info(
     "[PADDLE] env=%s api_key_present=%s webhook_secret_present=%s price_id_present=%s",
@@ -647,49 +652,64 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+# Dos contadores independientes que comparten el MISMO periodo (ciclo unificado):
+# - "generation": crear material (preguntas, flashcards, resúmenes).
+# - "correction": evaluar respuestas de desarrollo (eval-dev / eval-dev-batch).
+# Campo del contador por tipo; el periodo es siempre `ai_period_start`.
+_QUOTA_FIELD = {"generation": "ai_generations_used", "correction": "ai_corrections_used"}
+
+
+def _ai_limit(plan: Optional[str], kind: str) -> int:
+    """Límite por periodo según plan y tipo de cuota (generación/corrección)."""
+    premium = plan == "premium"
+    if kind == "correction":
+        return PREMIUM_AI_CORRECTIONS_PER_MONTH if premium else FREE_AI_CORRECTIONS_PER_MONTH
+    return PREMIUM_AI_GENERATIONS_PER_MONTH if premium else FREE_AI_GENERATIONS_PER_MONTH
+
+
+# Retrocompat: algunos sitios/tests podían llamar al límite de generaciones.
 def _ai_limit_for_plan(plan: Optional[str]) -> int:
-    """Límite de generaciones de IA por periodo según el plan."""
-    if plan == "premium":
-        return PREMIUM_AI_GENERATIONS_PER_MONTH
-    return FREE_AI_GENERATIONS_PER_MONTH
+    return _ai_limit(plan, "generation")
 
 
-async def check_and_consume_ai_quota(user: dict, cost: int = 1) -> dict:
-    """Comprueba el plan y la cuota mensual de IA del usuario y consume `cost`.
+async def check_and_consume_ai_quota(user: dict, kind: str = "generation", cost: int = 1) -> dict:
+    """Comprueba el plan y la cuota del usuario para `kind` y consume `cost`.
 
-    - Reinicia el periodo (used=0, period_start=now) si han pasado >= AI_PERIOD_DAYS
-      desde ai_period_start, ANTES de comprobar el límite.
-    - Si used + cost supera el límite del plan, lanza HTTPException 402.
-    - Si pasa, incrementa `ai_generations_used` de forma atómica ($inc) y devuelve
-      el estado {used, limit, remaining, period_start, plan}.
+    Ciclo unificado: ambos contadores comparten `ai_period_start`. Al expirar el
+    periodo se reinician LOS DOS a 0 (una sola fecha de reinicio para el usuario),
+    antes de comprobar el límite. Si used+cost supera el límite del tipo → 402
+    (mensaje diferenciado). Si pasa, incrementa el contador del tipo de forma
+    atómica ($inc) y devuelve {used, limit, remaining, period_start, plan, kind}.
 
-    OBLIGATORIO: invocar esta función antes de CUALQUIER llamada a Gemini.
+    OBLIGATORIO: invocar antes de CUALQUIER llamada a Gemini.
     """
     uid = user["id"]
     plan = user.get("plan", "free")
-    limit = _ai_limit_for_plan(plan)
+    field = _QUOTA_FIELD[kind]
+    limit = _ai_limit(plan, kind)
 
     now = datetime.now(timezone.utc)
-    used = int(user.get("ai_generations_used", 0) or 0)
+    used = int(user.get(field, 0) or 0)
     period_start = _parse_iso(user.get("ai_period_start"))
 
-    # Reinicio del periodo si procede (o si nunca se inicializó).
+    # Reinicio unificado del periodo (o si nunca se inicializó): AMBOS a 0.
     if period_start is None or (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
         used = 0
         period_start = now
         await db.users.update_one(
             {"id": uid},
-            {"$set": {"ai_generations_used": 0, "ai_period_start": now.isoformat()}},
+            {"$set": {"ai_generations_used": 0, "ai_corrections_used": 0, "ai_period_start": now.isoformat()}},
         )
 
     if used + cost > limit:
+        detalle = "correcciones" if kind == "correction" else "generaciones"
         raise HTTPException(
             status_code=402,
-            detail="Has alcanzado el límite de generaciones de IA de este mes para tu plan",
+            detail=f"Has alcanzado el límite de {detalle} de IA de este mes para tu plan",
         )
 
-    # Consumo atómico.
-    await db.users.update_one({"id": uid}, {"$inc": {"ai_generations_used": cost}})
+    # Consumo atómico del contador del tipo.
+    await db.users.update_one({"id": uid}, {"$inc": {field: cost}})
     new_used = used + cost
     return {
         "used": new_used,
@@ -697,16 +717,17 @@ async def check_and_consume_ai_quota(user: dict, cost: int = 1) -> dict:
         "remaining": max(0, limit - new_used),
         "period_start": period_start.isoformat(),
         "plan": plan,
+        "kind": kind,
     }
 
 
-async def _refund_ai_quota(user: dict, cost: int = 1) -> None:
-    """Revierte un consumo previo (p. ej. si la llamada a Gemini falló).
+async def _refund_ai_quota(user: dict, kind: str = "generation", cost: int = 1) -> None:
+    """Revierte un consumo previo del contador `kind` (p. ej. si Gemini falló).
     No debe penalizarse al usuario por un fallo nuestro."""
     try:
-        await db.users.update_one({"id": user["id"]}, {"$inc": {"ai_generations_used": -cost}})
+        await db.users.update_one({"id": user["id"]}, {"$inc": {_QUOTA_FIELD[kind]: -cost}})
     except Exception as e:  # pragma: no cover - best effort
-        logger.error("No se pudo revertir la cuota de IA del usuario %s: %s", user.get("id"), e)
+        logger.error("No se pudo revertir la cuota (%s) del usuario %s: %s", kind, user.get("id"), e)
 
 
 # ---------------------------------------------------------------------------
@@ -1840,8 +1861,8 @@ async def eval_dev_answer(req: EvalDevReq, current_user: dict = Depends(get_curr
     if q.get("question_type") != "dev":
         raise HTTPException(status_code=400, detail="Solo para preguntas de desarrollo")
 
-    # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
+    # Comprobar plan + cuota de CORRECCIONES ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user, kind="correction")
     result = await evaluate_dev_answer(
         q["question"],
         q.get("model_answer", ""),
@@ -1850,7 +1871,7 @@ async def eval_dev_answer(req: EvalDevReq, current_user: dict = Depends(get_curr
     )
     # evaluate_dev_answer no lanza: si falló internamente, revertir el consumo.
     if result.pop("_ai_error", False):
-        await _refund_ai_quota(current_user)
+        await _refund_ai_quota(current_user, kind="correction")
     return result
 
 
@@ -1867,12 +1888,13 @@ class EvalDevBatchReq(BaseModel):
 async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_current_user)):
     """Corrige VARIAS respuestas de desarrollo de una vez (envío de un examen).
 
-    - Cuenta como **1 unidad de cuota** para todo el lote (como flashcards), no N.
+    - Cuota de CORRECCIONES: **1 por respuesta evaluada** (no en blanco), igual
+      que la corrección individual → sin incentivo perverso examen vs práctica.
     - Las respuestas en blanco NO se evalúan: 0 puntos, sin gastar cuota. Si TODAS
       están en blanco, no se consume nada.
     - Se comprueba la cuota UNA vez, al principio → nunca hay 402 a mitad de examen.
     - Robustez: evalúa en paralelo; si TODAS las evaluadas fallan, reembolsa y 502;
-      los fallos parciales devuelven 0 + aviso (sin cargo extra).
+      los fallos parciales devuelven 0 + aviso y se reembolsan (sin cargo).
     """
     uid = current_user["id"]
     if not req.answers:
@@ -1899,16 +1921,19 @@ async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_
     if not to_eval:
         return {"results": [results_by_id[a.question_id] for a in req.answers]}
 
-    # 1 unidad para todo el lote, comprobada ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
+    # 1 corrección por respuesta a evaluar (no en blanco). Cuota comprobada UNA
+    # vez, antes de llamar a Gemini → nunca hay 402 a mitad de examen.
+    await check_and_consume_ai_quota(current_user, kind="correction", cost=len(to_eval))
     evals = await asyncio.gather(*[
         evaluate_dev_answer(q["question"], q.get("model_answer", ""), ua, q.get("explanation", ""))
         for (_qid, q, ua) in to_eval
     ])
 
     any_ok = False
+    num_failed = 0
     for (qid, _q, _ua), res in zip(to_eval, evals):
         if res.pop("_ai_error", False):
+            num_failed += 1
             results_by_id[qid] = {"question_id": qid, "score": 0, "feedback": "No se pudo evaluar", "key_points_missing": []}
         else:
             any_ok = True
@@ -1919,8 +1944,10 @@ async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_
                 "key_points_missing": res.get("key_points_missing", []),
             }
 
+    # No se cobra por evaluación fallida: se reembolsan las que fallaron.
+    if num_failed:
+        await _refund_ai_quota(current_user, kind="correction", cost=num_failed)
     if not any_ok:
-        await _refund_ai_quota(current_user)
         raise HTTPException(status_code=502, detail="No se pudieron evaluar las respuestas de desarrollo")
 
     return {"results": [results_by_id[a.question_id] for a in req.answers]}
@@ -2568,7 +2595,8 @@ class User(BaseModel):
     email: str
     plan: str = "free"
     ai_generations_used: int = 0
-    ai_period_start: str = Field(default_factory=_now_iso)
+    ai_corrections_used: int = 0
+    ai_period_start: str = Field(default_factory=_now_iso)  # periodo compartido por ambos contadores
     # Suscripción (Paddle Billing v4)
     subscription_status: str = "free"  # free | active | canceled | past_due | trialing
     paddle_customer_id: Optional[str] = None
@@ -2655,25 +2683,35 @@ async def usage_me(current_user: dict = Depends(get_current_user)):
     Es de solo lectura: refleja el reinicio del periodo si ya ha expirado, pero
     NO consume ni escribe (el reinicio real se hace al consumir)."""
     plan = current_user.get("plan", "free")
-    limit = _ai_limit_for_plan(plan)
     now = datetime.now(timezone.utc)
-    used = int(current_user.get("ai_generations_used", 0) or 0)
+    gen_used = int(current_user.get("ai_generations_used", 0) or 0)
+    corr_used = int(current_user.get("ai_corrections_used", 0) or 0)
     period_start = _parse_iso(current_user.get("ai_period_start")) or now
 
-    # Si el periodo ya expiró, mostrar el estado como reiniciado.
+    # Ciclo unificado: si el periodo ya expiró, mostrar AMBOS como reiniciados.
     if (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
-        used = 0
+        gen_used = 0
+        corr_used = 0
         period_start = now
 
     reset_at = period_start + timedelta(days=AI_PERIOD_DAYS)
     days_until_reset = max(0, (reset_at - now).days)
+
+    def _block(used: int, limit: int) -> dict:
+        return {"used": used, "limit": limit, "remaining": max(0, limit - used)}
+
+    gen_limit = _ai_limit(plan, "generation")
+    corr_limit = _ai_limit(plan, "correction")
     return {
         "plan": plan,
-        "used": used,
-        "limit": limit,
-        "remaining": max(0, limit - used),
         "period_start": period_start.isoformat(),
         "days_until_reset": days_until_reset,
+        "generations": _block(gen_used, gen_limit),
+        "corrections": _block(corr_used, corr_limit),
+        # Retrocompat (= generaciones) para no romper el front durante el deploy.
+        "used": gen_used,
+        "limit": gen_limit,
+        "remaining": max(0, gen_limit - gen_used),
     }
 
 

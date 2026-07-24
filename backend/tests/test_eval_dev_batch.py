@@ -25,8 +25,9 @@ async def _fake_eval(question, model_answer, user_answer, key_points):
 def srv():
     import server
     server.evaluate_dev_answer = _fake_eval
-    # Límite alto para que otros tests que lo bajaron no interfieran.
+    # Límites altos para que otros tests que los bajaron no interfieran.
     server.FREE_AI_GENERATIONS_PER_MONTH = 1000
+    server.FREE_AI_CORRECTIONS_PER_MONTH = 5000
     return server
 
 
@@ -72,7 +73,8 @@ def _mcq_q(srv, uid, qid):
 
 
 def _used(client, h):
-    return client.get("/api/usage/me", headers=h).json()["used"]
+    # El batch consume el contador de CORRECCIONES (no generaciones).
+    return client.get("/api/usage/me", headers=h).json()["corrections"]["used"]
 
 
 def _batch(client, h, items):
@@ -84,7 +86,7 @@ def _results_by_id(body):
 
 
 # --------------------------------------------------------------------------
-def test_batch_counts_one_unit(client, srv):
+def test_batch_charges_one_per_evaluated(client, srv):
     uid, h = _auth(client, "edb1@x.com")
     for q in ("edb1_a", "edb1_b", "edb1_c"):
         _dev_q(srv, uid, q)
@@ -95,7 +97,7 @@ def test_batch_counts_one_unit(client, srv):
         {"question_id": "edb1_c", "user_answer": "resp c"},
     ])
     assert r.status_code == 200, r.text
-    assert _used(client, h) == before + 1  # 1 unidad para 3 respuestas
+    assert _used(client, h) == before + 3  # 1 corrección por respuesta evaluada
     res = _results_by_id(r.json())
     assert all(res[q]["score"] == 7 for q in ("edb1_a", "edb1_b", "edb1_c"))
 

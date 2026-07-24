@@ -72,7 +72,7 @@ una sola vez en `pdfs` (ahorra espacio en Atlas M0 al no duplicar). Reglas clave
 ### Variables de entorno
 - Backend (base): `MONGO_URL`, `DB_NAME`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CORS_ORIGINS`, `LOG_LEVEL` (por defecto `INFO`; súbelo a `DEBUG` para ver las trazas rutinarias, p. ej. las de Paddle).
 - Backend (auth): `JWT_SECRET`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
-- Backend (límites IA): `FREE_AI_GENERATIONS_PER_MONTH`, `PREMIUM_AI_GENERATIONS_PER_MONTH`.
+- Backend (límites IA): `FREE_AI_GENERATIONS_PER_MONTH` (30), `PREMIUM_AI_GENERATIONS_PER_MONTH` (2000), `FREE_AI_CORRECTIONS_PER_MONTH` (300), `PREMIUM_AI_CORRECTIONS_PER_MONTH` (5000).
 - Backend (pagos Paddle): `PADDLE_ENV` (`sandbox`|`production`), `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_PREMIUM_PRICE_ID`.
 - Frontend: `REACT_APP_BACKEND_URL`, `REACT_APP_PADDLE_CLIENT_TOKEN`, `REACT_APP_PADDLE_ENV`, `REACT_APP_PADDLE_PREMIUM_PRICE_ID`.
 
@@ -108,7 +108,11 @@ Frontend: **`PdfPicker`** (selector presentacional de PDFs, todos preseleccionad
 
 Frontend: pantalla **Banco de preguntas** en `/preguntas` (`frontend/src/pages/QuestionBank.jsx`, entrada "Preguntas" en el nav). Filtros + buscador + chips de estado; tarjetas con favorito/difícil, editar (`EditQuestionDialog`, PATCH `/questions/{id}`), ir al tema, borrar; botón "Practicar selección" (usa `/questions/ids` → `quiz/start` con `question_ids`, avisa si `capped`).
 
-**Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me`.
+**Cuota de IA — dos contadores (ciclo unificado):** el usuario tiene **`ai_generations_used`** (crear material: preguntas, flashcards, resúmenes) y **`ai_corrections_used`** (evaluar respuestas de desarrollo: `eval-dev` y `eval-dev-batch`), que **comparten `ai_period_start`** y se **reinician juntos** cada `AI_PERIOD_DAYS` (30). `check_and_consume_ai_quota(user, kind, cost)` / `_refund_ai_quota(user, kind, cost)` con `kind ∈ {generation, correction}`; el 402 diferencia "generaciones" vs "correcciones". **1 corrección por respuesta evaluada** (individual y batch); las respuestas en blanco no se evalúan ni cuentan. Migración de backfill: `backend/scripts/migrate_corrections_counter.py` (idempotente, `DRY_RUN=1`) inicializa `ai_corrections_used=0` en usuarios existentes. **Coste real (medido en logs):** una generación de 10 preguntas ≈ 27k tokens; una corrección ≈ 900 tokens (~30× menos) → de ahí los límites de correcciones más holgados.
+
+**Logging de tokens (INFO):** cada llamada a Gemini registra `[GEMINI-USAGE] op=<generate_questions|eval_dev|flashcards|summary> in=… out=… thoughts=… total=…` (de `response.usage_metadata`; `thoughts` = tokens de razonamiento de `gemini-2.5-flash`). Solo logging, sin persistir.
+
+**Pagos Paddle (Billing v4):** `POST /api/billing/checkout`, `GET /api/billing/status` (incl. `cancel_scheduled`), `POST /api/billing/portal` (customer portal), `POST /api/webhooks/paddle` (sin auth; firma HMAC verificada, idempotente por `event_id`). **Uso IA:** `GET /api/usage/me` (devuelve `generations` y `corrections` + campos planos retrocompat = generaciones).
 
 Frontend: pantalla **Biblioteca** en `/biblioteca` (`frontend/src/pages/Library.jsx`, entrada "Biblioteca" en el nav de `Layout`). La creación de temas usa **`CreateTopicDialog`** (`frontend/src/components/CreateTopicDialog.jsx`): pide solo el nombre y, de forma **opcional**, adjunta PDFs (subir nuevos y/o elegir de la biblioteca) sin generar preguntas. Dentro del tema, `AddPdfDialog` sube/vincula PDFs y `GenerateDialog` genera las preguntas aparte. (El antiguo `UploadDialog`, que obligaba a subir PDF + generar al crear, se eliminó.)
 
