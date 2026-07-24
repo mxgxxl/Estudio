@@ -1827,6 +1827,78 @@ async def eval_dev_answer(req: EvalDevReq, current_user: dict = Depends(get_curr
     return result
 
 
+class DevBatchItem(BaseModel):
+    question_id: str
+    user_answer: str = ""
+
+
+class EvalDevBatchReq(BaseModel):
+    answers: List[DevBatchItem]
+
+
+@api.post("/quiz/eval-dev-batch")
+async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_current_user)):
+    """Corrige VARIAS respuestas de desarrollo de una vez (envío de un examen).
+
+    - Cuenta como **1 unidad de cuota** para todo el lote (como flashcards), no N.
+    - Las respuestas en blanco NO se evalúan: 0 puntos, sin gastar cuota. Si TODAS
+      están en blanco, no se consume nada.
+    - Se comprueba la cuota UNA vez, al principio → nunca hay 402 a mitad de examen.
+    - Robustez: evalúa en paralelo; si TODAS las evaluadas fallan, reembolsa y 502;
+      los fallos parciales devuelven 0 + aviso (sin cargo extra).
+    """
+    uid = current_user["id"]
+    if not req.answers:
+        return {"results": []}
+
+    ids = [a.question_id for a in req.answers]
+    qmap = {
+        q["id"]: q
+        for q in await db.questions.find({"id": {"$in": ids}, "user_id": uid}, {"_id": 0}).to_list(500)
+    }
+
+    results_by_id: dict = {}
+    to_eval = []  # (question_id, question_doc, user_answer)
+    for a in req.answers:
+        q = qmap.get(a.question_id)
+        if not q or q.get("question_type") != "dev":
+            results_by_id[a.question_id] = {"question_id": a.question_id, "score": 0, "feedback": "", "key_points_missing": []}
+        elif not a.user_answer.strip():
+            results_by_id[a.question_id] = {"question_id": a.question_id, "score": 0, "feedback": "Sin responder", "key_points_missing": []}
+        else:
+            to_eval.append((a.question_id, q, a.user_answer))
+
+    # Nada que evaluar (todo en blanco / inválido) → sin cuota.
+    if not to_eval:
+        return {"results": [results_by_id[a.question_id] for a in req.answers]}
+
+    # 1 unidad para todo el lote, comprobada ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
+    evals = await asyncio.gather(*[
+        evaluate_dev_answer(q["question"], q.get("model_answer", ""), ua, q.get("explanation", ""))
+        for (_qid, q, ua) in to_eval
+    ])
+
+    any_ok = False
+    for (qid, _q, _ua), res in zip(to_eval, evals):
+        if res.pop("_ai_error", False):
+            results_by_id[qid] = {"question_id": qid, "score": 0, "feedback": "No se pudo evaluar", "key_points_missing": []}
+        else:
+            any_ok = True
+            results_by_id[qid] = {
+                "question_id": qid,
+                "score": res.get("score", 0),
+                "feedback": res.get("feedback", ""),
+                "key_points_missing": res.get("key_points_missing", []),
+            }
+
+    if not any_ok:
+        await _refund_ai_quota(current_user)
+        raise HTTPException(status_code=502, detail="No se pudieron evaluar las respuestas de desarrollo")
+
+    return {"results": [results_by_id[a.question_id] for a in req.answers]}
+
+
 # ---- Quiz ----
 class QuizStartReq(BaseModel):
     mode: Literal["exam", "practice", "errors", "srs", "favorites"]

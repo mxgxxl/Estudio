@@ -4,10 +4,12 @@ import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown
 import { toast } from "sonner";
 import { quizStart } from "@/lib/api";
 
-function DevReviewCard({ question, devScore }) {
+function DevReviewCard({ question, devScore, devResult }) {
     const [showModel, setShowModel] = useState(false);
     const score = devScore ?? 0;
     const passed = score >= 5;
+    const feedback = devResult?.feedback;
+    const missing = devResult?.key_points_missing || [];
 
     return (
         <div className="space-y-2">
@@ -22,6 +24,17 @@ function DevReviewCard({ question, devScore }) {
                     {score}/10
                 </span>
             </div>
+            {feedback && (
+                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{feedback}</p>
+            )}
+            {missing.length > 0 && (
+                <div>
+                    <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>Puntos que faltaron:</p>
+                    <ul className="list-disc list-inside text-xs space-y-0.5" style={{ color: "var(--text-secondary)" }}>
+                        {missing.map((p, i) => <li key={i}>{p}</li>)}
+                    </ul>
+                </div>
+            )}
             <button
                 onClick={() => setShowModel(o => !o)}
                 className="flex items-center gap-1 text-xs font-medium hover:underline"
@@ -72,6 +85,7 @@ export default function QuizResults() {
         questions,
         answers,
         devScores = {},
+        devResults = {},
     } = data;
 
     const pct = total ? Math.round((correct / total) * 100) : 0;
@@ -230,6 +244,7 @@ export default function QuizResults() {
                     const sel = answers[i];
                     const isDevQ = q.question_type === "dev";
                     const devScore = devScores[q.id];
+                    const devResult = devResults[q.id];
                     const isUnanswered = !isDevQ && sel === -1;
                     const ok = isDevQ
                         ? (devScore ?? 0) >= 5
@@ -265,7 +280,7 @@ export default function QuizResults() {
 
                                     {/* Development question review */}
                                     {isDevQ ? (
-                                        <DevReviewCard question={q} devScore={devScore} />
+                                        <DevReviewCard question={q} devScore={devScore} devResult={devResult} />
                                     ) : (
                                         <>
                                             <ul className="space-y-1 text-sm">

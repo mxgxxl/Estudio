@@ -73,14 +73,15 @@ function TemarioPanel({ topicId, topicName }) {
 }
 
 // Componente para preguntas de desarrollo
-function DevQuestion({ question, onAnswer, revealed, devResult, devLoading }) {
-    const [userAnswer, setUserAnswer] = useState("");
-
+// `value`/`onChange` los controla el padre (persisten al navegar, imprescindible
+// en examen). En examen la respuesta NO se evalúa aquí: se corrige toda de una
+// vez al finalizar. En práctica se mantiene la evaluación inline.
+function DevQuestion({ question, isExam, value, onChange, onSubmit, revealed, devResult, devLoading }) {
     return (
         <div className="space-y-4">
             <textarea
-                value={userAnswer}
-                onChange={e => setUserAnswer(e.target.value)}
+                value={value}
+                onChange={e => onChange(e.target.value)}
                 disabled={revealed}
                 placeholder="Escribe tu respuesta aquí..."
                 className="w-full h-36 p-3 rounded-md border text-sm resize-none focus:outline-none focus:ring-1"
@@ -91,17 +92,21 @@ function DevQuestion({ question, onAnswer, revealed, devResult, devLoading }) {
                     focusRingColor: "var(--brand)"
                 }}
             />
-            {!revealed && (
+            {isExam ? (
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    La IA corregirá tu respuesta al finalizar el examen.
+                </p>
+            ) : !revealed && (
                 <button
-                    onClick={() => onAnswer(userAnswer)}
-                    disabled={!userAnswer.trim() || devLoading}
+                    onClick={() => onSubmit(value)}
+                    disabled={!value.trim() || devLoading}
                     className="btn-primary flex items-center gap-2 text-sm"
                 >
                     {devLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                     Evaluar respuesta
                 </button>
             )}
-            {revealed && devResult && (
+            {!isExam && revealed && devResult && (
                 <div className="space-y-3 fade-up">
                     <div
                         className="rounded-md p-4 border"
@@ -230,9 +235,12 @@ export default function QuizRun() {
     const [idx, setIdx] = useState(0);
     const [answers, setAnswers] = useState([]);
     const [devScores, setDevScores] = useState({}); // { questionId: score }
+    const [devResultsMap, setDevResultsMap] = useState({}); // { questionId: {score, feedback, key_points_missing} } para resultados
+    const [devAnswers, setDevAnswers] = useState({}); // { questionId: texto } (persiste al navegar; examen)
     const [revealed, setRevealed] = useState(false);
     const [devResult, setDevResult] = useState(null);
     const [devLoading, setDevLoading] = useState(false);
+    const [submitting, setSubmitting] = useState(false); // corrigiendo/enviando el examen
     const [elapsed, setElapsed] = useState(0);
     const [showTemario, setShowTemario] = useState(false);
     const [editOpen, setEditOpen] = useState(false);
@@ -265,7 +273,38 @@ export default function QuizRun() {
     const handleSubmit = async () => {
         if (submittedRef.current) return;
         submittedRef.current = true;
+        setSubmitting(true);
         try {
+            // En EXAMEN la corrección de desarrollo se difiere a aquí: se evalúan
+            // TODAS de una vez (1 unidad de cuota para el lote). Las que están en
+            // blanco no se evalúan (0, sin gastar cuota). En práctica ya vienen
+            // evaluadas inline en devScores.
+            let scores = devScores;
+            let devResults = { ...devResultsMap }; // práctica: feedback inline ya acumulado
+            const devQs = quiz.questions.filter((qq) => qq.question_type === "dev");
+            if (isExam && devQs.length > 0) {
+                try {
+                    const items = devQs.map((qq) => ({
+                        question_id: qq.id,
+                        user_answer: devAnswers[qq.id] || "",
+                    }));
+                    const { data } = await api.post("/quiz/eval-dev-batch", { answers: items });
+                    scores = { ...devScores };
+                    (data.results || []).forEach((r) => {
+                        scores[r.question_id] = r.score;
+                        devResults[r.question_id] = r;
+                    });
+                    setDevScores(scores);
+                } catch (err) {
+                    // No bloqueamos el examen por un fallo de corrección: se guarda
+                    // con las de desarrollo sin nota (0) y avisamos.
+                    const msg = err?.response?.status === 402
+                        ? "Sin cuota para corregir las de desarrollo: el examen se guarda sin su nota."
+                        : "No se pudieron corregir las de desarrollo: se guardan sin nota.";
+                    toast.error(msg);
+                }
+            }
+
             const payload = {
                 mode: quiz.mode,
                 subject_ids: quiz.subject_ids || [],
@@ -275,7 +314,7 @@ export default function QuizRun() {
                     selected: answers[i] ?? -1,
                     correct_index: qq.correct_index,
                     question_type: qq.question_type,
-                    dev_score: devScores[qq.id] ?? 0,
+                    dev_score: scores[qq.id] ?? 0,
                 })),
                 duration_seconds: Math.floor((Date.now() - startedRef.current) / 1000),
                 time_limit_seconds: quiz.time_limit_seconds || null,
@@ -287,13 +326,15 @@ export default function QuizRun() {
                 ...res,
                 questions: quiz.questions,
                 answers,
-                devScores,
+                devScores: scores,
+                devResults,  // feedback por pregunta (lo consumirá la pantalla de resultados en D)
                 mode: quiz.mode,
             }));
             navigate("/quiz/results");
         } catch {
             toast.error("Error al enviar el examen");
             submittedRef.current = false;
+            setSubmitting(false);
         }
     };
 
@@ -328,6 +369,7 @@ export default function QuizRun() {
             });
             setDevResult(res.data);
             setDevScores(prev => ({ ...prev, [q.id]: res.data.score }));
+            setDevResultsMap(prev => ({ ...prev, [q.id]: res.data })); // para el feedback en resultados
             const next = [...answers]; next[idx] = 0; setAnswers(next); // mark as answered
             setRevealed(true);
         } catch {
@@ -384,7 +426,9 @@ export default function QuizRun() {
     };
 
     const answeredCount = answers.filter((a) => a !== -1).length;
-    const canGoNext = isDevQ ? revealed : (isExam ? true : revealed);
+    // En examen se navega libre (dev incluido: se corrige al final). En práctica
+    // hay que revelar/responder para avanzar.
+    const canGoNext = isExam ? true : revealed;
 
     return (
         <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
@@ -471,7 +515,17 @@ export default function QuizRun() {
                     {isDevQ ? (
                         <DevQuestion
                             question={q}
-                            onAnswer={onDevAnswer}
+                            isExam={isExam}
+                            value={devAnswers[q.id] || ""}
+                            onChange={(text) => {
+                                setDevAnswers((prev) => ({ ...prev, [q.id]: text }));
+                                if (isExam) {
+                                    const next = [...answers];
+                                    next[idx] = text.trim() ? 0 : -1; // marca respondida/en blanco
+                                    setAnswers(next);
+                                }
+                            }}
+                            onSubmit={onDevAnswer}
                             revealed={revealed}
                             devResult={devResult}
                             devLoading={devLoading}
@@ -529,7 +583,10 @@ export default function QuizRun() {
                         </span>
                         {isExam ? (
                             idx + 1 === quiz.questions.length ? (
-                                <button onClick={handleSubmit} data-testid="submit-exam-btn" className="btn-primary flex items-center gap-2 text-sm">Finalizar</button>
+                                <button onClick={handleSubmit} disabled={submitting} data-testid="submit-exam-btn" className="btn-primary flex items-center gap-2 text-sm disabled:opacity-60">
+                                    {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                                    {submitting ? "Corrigiendo…" : "Finalizar"}
+                                </button>
                             ) : (
                                 <button onClick={onNext} data-testid="next-btn" className="btn-primary flex items-center gap-2 text-sm">
                                     Siguiente <ChevronRight className="w-4 h-4" />
@@ -548,6 +605,18 @@ export default function QuizRun() {
             {/* Modal edición */}
             {editOpen && !isDevQ && (
                 <EditModal question={q} onClose={() => setEditOpen(false)} onSaved={onQuestionEdited} />
+            )}
+
+            {/* Overlay mientras se corrige/envía (la corrección de desarrollo en
+                examen puede tardar unos segundos). También cubre el auto-envío por
+                tiempo agotado. */}
+            {submitting && isExam && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(35,33,31,0.55)" }} data-testid="submitting-overlay">
+                    <div className="card-organic px-6 py-5 flex items-center gap-3" style={{ background: "white" }}>
+                        <Loader2 className="w-5 h-5 animate-spin" style={{ color: "var(--brand)" }} />
+                        <span className="text-sm font-medium">Corrigiendo tu examen…</span>
+                    </div>
+                </div>
             )}
         </div>
     );
