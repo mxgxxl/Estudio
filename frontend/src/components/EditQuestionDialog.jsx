@@ -6,7 +6,7 @@ import { editQuestion } from "@/lib/api";
 // Edición simple de una pregunta (enunciado, opciones + correcta, explicación /
 // respuesta modelo). Reutiliza PATCH /questions/{id}. Se abre cuando `question`
 // no es null; devuelve los campos actualizados por onSaved para refrescar la lista.
-export default function EditQuestionDialog({ question, onClose, onSaved }) {
+export default function EditQuestionDialog({ question, onClose, onSaved, notice }) {
     const [text, setText] = useState("");
     const [options, setOptions] = useState([]);
     const [correctIndex, setCorrectIndex] = useState(0);
@@ -73,6 +73,15 @@ export default function EditQuestionDialog({ question, onClose, onSaved }) {
                 </div>
 
                 <form onSubmit={onSubmit} className="p-5 space-y-4">
+                    {notice && (
+                        <div
+                            className="text-xs rounded-md p-2.5"
+                            style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                            data-testid="edit-question-notice"
+                        >
+                            {notice}
+                        </div>
+                    )}
                     <div>
                         <label className="label-eyebrow block mb-1.5">Enunciado</label>
                         <textarea

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp, Loader2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { quizStart } from "@/lib/api";
+import EditQuestionDialog from "@/components/EditQuestionDialog";
 
-function DevReviewCard({ question, devScore, devResult }) {
+function DevReviewCard({ question, devScore, devResult, onEditModel }) {
     const [showModel, setShowModel] = useState(false);
     const score = devScore ?? 0;
     const passed = score >= 5;
@@ -35,15 +36,25 @@ function DevReviewCard({ question, devScore, devResult }) {
                     </ul>
                 </div>
             )}
-            <button
-                onClick={() => setShowModel(o => !o)}
-                className="flex items-center gap-1 text-xs font-medium hover:underline"
-                style={{ color: "var(--brand)" }}
-            >
-                <BookOpen className="w-3 h-3" />
-                {showModel ? "Ocultar" : "Ver"} respuesta modelo
-                {showModel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
+            <div className="flex items-center gap-3">
+                <button
+                    onClick={() => setShowModel(o => !o)}
+                    className="flex items-center gap-1 text-xs font-medium hover:underline"
+                    style={{ color: "var(--brand)" }}
+                >
+                    <BookOpen className="w-3 h-3" />
+                    {showModel ? "Ocultar" : "Ver"} respuesta modelo
+                    {showModel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                </button>
+                <button
+                    onClick={() => onEditModel?.(question)}
+                    data-testid={`edit-model-${question.id}`}
+                    className="flex items-center gap-1 text-xs font-medium hover:underline"
+                    style={{ color: "var(--text-secondary)" }}
+                >
+                    <Pencil className="w-3 h-3" /> Editar respuesta modelo
+                </button>
+            </div>
             {showModel && question.model_answer && (
                 <div
                     className="rounded-md p-3 text-sm leading-relaxed"
@@ -65,6 +76,21 @@ export default function QuizResults() {
     const navigate = useNavigate();
     const [data, setData] = useState(null);
     const [reviewing, setReviewing] = useState(false);
+    const [editingModel, setEditingModel] = useState(null); // pregunta cuya respuesta modelo se edita
+
+    // Al guardar la respuesta modelo desde resultados: se persiste en el backend
+    // (para próximos exámenes) y refrescamos la vista actual + el sessionStorage,
+    // pero la NOTA de este examen no cambia (no hay recorrección).
+    const onModelSaved = (updated) => {
+        setData((d) => {
+            if (!d) return d;
+            const questions = d.questions.map((q) => (q.id === updated.id ? { ...q, ...updated } : q));
+            const next = { ...d, questions };
+            try { sessionStorage.setItem("quiz_result", JSON.stringify(next)); } catch { /* noop */ }
+            return next;
+        });
+        setEditingModel(null);
+    };
 
     useEffect(() => {
         const raw = sessionStorage.getItem("quiz_result");
@@ -280,7 +306,7 @@ export default function QuizResults() {
 
                                     {/* Development question review */}
                                     {isDevQ ? (
-                                        <DevReviewCard question={q} devScore={devScore} devResult={devResult} />
+                                        <DevReviewCard question={q} devScore={devScore} devResult={devResult} onEditModel={setEditingModel} />
                                     ) : (
                                         <>
                                             <ul className="space-y-1 text-sm">
@@ -320,6 +346,13 @@ export default function QuizResults() {
                     );
                 })}
             </div>
+
+            <EditQuestionDialog
+                question={editingModel}
+                onClose={() => setEditingModel(null)}
+                onSaved={onModelSaved}
+                notice="Los cambios se aplicarán en próximos exámenes; tu nota actual no cambia."
+            />
         </div>
     );
 }
