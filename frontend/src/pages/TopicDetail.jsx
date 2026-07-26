@@ -25,11 +25,12 @@ import {
     deleteQuestion,
     deletePdf,
     unlinkPdfFromTopic,
-    generateTopicSummary,
+    generatePdfSummary,
+    getTopicSummaries,
 } from "@/lib/api";
 import GenerateDialog from "@/components/GenerateDialog";
 import AddPdfDialog from "@/components/AddPdfDialog";
-import PdfSelectDialog from "@/components/PdfSelectDialog";
+import SummaryPanel from "@/components/SummaryPanel";
 
 export default function TopicDetail() {
     const { id } = useParams();
@@ -42,21 +43,25 @@ export default function TopicDetail() {
     const [addOpen, setAddOpen] = useState(false);
     const [pdfToRemove, setPdfToRemove] = useState(null); // PDF pendiente de quitar/borrar
     const [removing, setRemoving] = useState(false);
-    const [summary, setSummary] = useState(null);
-    const [summaryOpen, setSummaryOpen] = useState(false);
-    const [summaryLoading, setSummaryLoading] = useState(false);
-    const [summaryPickOpen, setSummaryPickOpen] = useState(false); // selector de PDFs (temas con >1 PDF)
+    // Resúmenes cacheados por PDF: mapa pdf_id -> content (JSON de Gemini).
+    const [summaries, setSummaries] = useState({});
+    const [openSummaryId, setOpenSummaryId] = useState(null); // panel expandido
+    const [summaryLoadingId, setSummaryLoadingId] = useState(null); // PDF generándose
 
     const load = async () => {
         try {
-            const [t, qs, ps] = await Promise.all([
+            const [t, qs, ps, sums] = await Promise.all([
                 getTopic(id),
                 getTopicQuestions(id),
                 getTopicPdfs(id),
+                getTopicSummaries(id),
             ]);
             setTopic(t);
             setQuestions(qs);
             setPdfs(ps);
+            setSummaries(
+                Object.fromEntries((sums || []).map((s) => [s.pdf_id, s.content]))
+            );
         } catch {
             toast.error("Error al cargar el tema");
         }
@@ -102,6 +107,7 @@ export default function TopicDetail() {
             const { pdf_deleted } = await unlinkPdfFromTopic(id, p.id);
             toast.success(pdf_deleted ? "PDF eliminado" : "PDF quitado de este tema");
             setPdfs((ps) => ps.filter((x) => x.id !== p.id));
+            forgetPdfSummary(p.id);
             setPdfToRemove(null);
         } catch (err) {
             toast.error(err?.response?.data?.detail || "No se pudo quitar el PDF");
@@ -119,6 +125,7 @@ export default function TopicDetail() {
             await deletePdf(p.id);
             toast.success("PDF eliminado de todos los temas");
             setPdfs((ps) => ps.filter((x) => x.id !== p.id));
+            forgetPdfSummary(p.id);
             setPdfToRemove(null);
         } catch (err) {
             toast.error(err?.response?.data?.detail || "No se pudo eliminar el PDF");
@@ -127,28 +134,35 @@ export default function TopicDetail() {
         }
     };
 
-    // Genera el resumen con los PDFs indicados (null = todos). Cierra el
-    // selector si estaba abierto y muestra el panel.
-    const runSummary = async (pdfIds = null) => {
-        setSummaryLoading(true);
+    // Genera (o regenera) el resumen de UN PDF y lo guarda en el mapa. Regenerar
+    // sobrescribe. Deja el panel de ese PDF abierto.
+    const genSummary = async (pid) => {
+        setSummaryLoadingId(pid);
         try {
-            const data = await generateTopicSummary(topic.id, pdfIds);
-            setSummary(data);
-            setSummaryOpen(true);
-            setSummaryPickOpen(false);
-        } catch {
-            toast.error("Error al generar el resumen");
+            const data = await generatePdfSummary(pid);
+            setSummaries((m) => ({ ...m, [pid]: data.content }));
+            setOpenSummaryId(pid);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "Error al generar el resumen");
         } finally {
-            setSummaryLoading(false);
+            setSummaryLoadingId(null);
         }
     };
 
-    // Botón "Resumen IA": si ya hay resumen, alterna el panel; si hay >1 PDF,
-    // abre el selector; con ≤1 PDF genera directo (un clic, sin fricción).
-    const onSummaryClick = () => {
-        if (summary) { setSummaryOpen(o => !o); return; }
-        if (pdfs.length > 1) { setSummaryPickOpen(true); return; }
-        runSummary(null);
+    // Botón "Resumen" de un PDF: si ya está cacheado, alterna el panel; si no,
+    // lo genera (consume cuota) y lo muestra.
+    const onPdfSummaryClick = (pid) => {
+        if (summaries[pid]) { setOpenSummaryId((o) => (o === pid ? null : pid)); return; }
+        genSummary(pid);
+    };
+
+    // Olvida el resumen cacheado de un PDF en el estado local (al quitar/borrar el PDF).
+    const forgetPdfSummary = (pid) => {
+        setSummaries((m) => {
+            const { [pid]: _drop, ...rest } = m;
+            return rest;
+        });
+        setOpenSummaryId((o) => (o === pid ? null : o));
     };
 
     if (!topic) {
@@ -182,15 +196,6 @@ export default function TopicDetail() {
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button
-                        onClick={onSummaryClick}
-                        data-testid="summary-btn"
-                        className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
-                        style={{ borderColor: "var(--border)" }}
-                    >
-                        {summaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpenCheck className="w-4 h-4" />}
-                        Resumen IA
-                    </button>
                     <Link
                         to={`/temas/${topic.id}/flashcards`}
                         data-testid="flashcards-btn"
@@ -209,47 +214,6 @@ export default function TopicDetail() {
                     </Link>
                 </div>
             </div>
-
-            {/* AI Summary panel */}
-            {summaryOpen && summary && (
-                <div className="card-organic p-5 mb-6 fade-up" style={{ borderLeft: "3px solid var(--brand)" }}>
-                    <div className="flex items-center justify-between mb-3">
-                        <span className="label-eyebrow flex items-center gap-2">
-                            <BookOpenCheck className="w-4 h-4" style={{ color: "var(--brand)" }} /> Resumen IA
-                        </span>
-                        <button onClick={() => setSummaryOpen(false)} className="text-xs hover:underline" style={{ color: "var(--text-muted)" }}>
-                            Cerrar
-                        </button>
-                    </div>
-                    {summary.overview && (
-                        <p className="text-sm mb-4 leading-relaxed" style={{ color: "var(--text-secondary)" }}>{summary.overview}</p>
-                    )}
-                    {summary.sections?.map((s, i) => (
-                        <div key={i} className="mb-3">
-                            <div className="font-display font-bold text-sm mb-1">{s.title}</div>
-                            <ul className="space-y-1">
-                                {s.points?.map((p, j) => (
-                                    <li key={j} className="text-sm flex gap-2" style={{ color: "var(--text-secondary)" }}>
-                                        <span style={{ color: "var(--brand)" }}>·</span>{p}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    ))}
-                    {summary.remember?.length > 0 && (
-                        <div className="mt-4 p-3 rounded-md" style={{ background: "var(--bg-secondary)" }}>
-                            <div className="text-xs font-bold mb-2" style={{ color: "var(--brand)" }}>💡 RECUERDA</div>
-                            <ul className="space-y-1">
-                                {summary.remember.map((r, i) => (
-                                    <li key={i} className="text-xs flex gap-2" style={{ color: "var(--text-secondary)" }}>
-                                        <span>→</span>{r}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    )}
-                </div>
-            )}
 
             {/* PDFs section */}
             <section className="mb-8">
@@ -285,8 +249,8 @@ export default function TopicDetail() {
                 ) : (
                     <div className="space-y-2">
                         {pdfs.map((p) => (
+                            <div key={p.id}>
                             <div
-                                key={p.id}
                                 className="card-organic p-4 flex items-center justify-between gap-3 fade-up"
                                 data-testid={`pdf-${p.id}`}
                             >
@@ -322,6 +286,21 @@ export default function TopicDetail() {
                                 </div>
                                 <div className="flex gap-1">
                                     <button
+                                        onClick={() => onPdfSummaryClick(p.id)}
+                                        disabled={summaryLoadingId === p.id}
+                                        data-testid={`summary-${p.id}`}
+                                        title={summaries[p.id] ? "Ver resumen" : "Generar resumen con IA"}
+                                        className="px-2.5 py-1.5 rounded-md text-xs font-medium hover:bg-[color:var(--bg-secondary)] flex items-center gap-1 disabled:opacity-50"
+                                        style={{ color: "var(--text-secondary)" }}
+                                    >
+                                        {summaryLoadingId === p.id ? (
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                            <BookOpenCheck className="w-3.5 h-3.5" />
+                                        )}
+                                        {summaries[p.id] ? "Ver resumen" : "Resumen IA"}
+                                    </button>
+                                    <button
                                         onClick={() => {
                                             setGenDefault([p.id]);
                                             setGenOpen(true);
@@ -341,6 +320,17 @@ export default function TopicDetail() {
                                         <Trash2 className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
                                     </button>
                                 </div>
+                            </div>
+                            {openSummaryId === p.id && summaries[p.id] && (
+                                <div className="mt-2">
+                                    <SummaryPanel
+                                        summary={summaries[p.id]}
+                                        onRegenerate={() => genSummary(p.id)}
+                                        regenerating={summaryLoadingId === p.id}
+                                        onClose={() => setOpenSummaryId(null)}
+                                    />
+                                </div>
+                            )}
                             </div>
                         ))}
                     </div>
@@ -489,18 +479,6 @@ export default function TopicDetail() {
                 currentPdfIds={pdfs.map((p) => p.id)}
                 onClose={() => setAddOpen(false)}
                 onUploaded={load}
-            />
-
-            <PdfSelectDialog
-                open={summaryPickOpen}
-                onClose={() => setSummaryPickOpen(false)}
-                title="Resumen IA"
-                subtitle="Elige de qué PDFs generar el resumen"
-                pdfs={pdfs}
-                loading={summaryLoading}
-                loadingText="Generando…"
-                submitLabel="Generar resumen"
-                onSubmit={(ids) => runSummary(ids)}
             />
 
             {pdfToRemove && (

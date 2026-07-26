@@ -183,16 +183,14 @@ export const getSurvivalRecords = () => api.get("/survival/records").then((r) =>
 export const getSurvivalRecord = (scopeType, scopeId) => api.get(`/survival/records/${scopeType}/${scopeId}`).then((r) => r.data);
 export const saveSurvivalRecord = (data) => api.post("/survival/records", data).then((r) => r.data);
 
-// AI Summary
-// pdfIds opcional (null/[] = todos los PDFs del tema)
-export const generateTopicSummary = (topicId, pdfIds = null) =>
-    api
-        .post(
-            `/topics/${topicId}/summary`,
-            pdfIds && pdfIds.length ? { pdf_ids: pdfIds } : {},
-            { timeout: 120000 }
-        )
-        .then((r) => r.data);
+// AI Summaries (persistidos, por PDF y compartidos entre temas)
+// Generar/regenerar consume 1 generación de cuota; servir de caché = 0.
+export const generatePdfSummary = (pdfId) =>
+    api.post(`/pdfs/${pdfId}/summary`, {}, { timeout: 120000 }).then((r) => r.data);
+export const getPdfSummary = (pdfId) =>
+    api.get(`/pdfs/${pdfId}/summary`).then((r) => r.data);
+export const getTopicSummaries = (topicId) =>
+    api.get(`/topics/${topicId}/summaries`).then((r) => r.data);
 
 // Gap detector
 export const getKnowledgeGaps = () => api.get("/stats/gaps", { timeout: STATS_TIMEOUT }).then((r) => r.data);
