@@ -147,6 +147,24 @@ class PdfLink(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+class Summary(BaseModel):
+    """Resumen de IA persistido (colección summaries).
+
+    Se keyea por `pdf_id` (NO por tema): como un PDF es muchos-a-muchos, su
+    resumen es COMPARTIDO por todos los temas que lo contengan. `scope` deja el
+    modelo preparado para futuros resúmenes de tema completo o varios por PDF; el
+    "1 por PDF" de hoy se impone a nivel de app con upsert (sin índice único).
+    `content` guarda el JSON estructurado de Gemini tal cual (overview/
+    key_concepts/sections/remember)."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    pdf_id: str
+    scope: str = "pdf"
+    content: dict
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 class Question(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
@@ -1378,6 +1396,8 @@ async def _delete_pdf_if_orphan(uid: str, pdf_id: str) -> bool:
     remaining = await db.pdf_links.count_documents({"user_id": uid, "pdf_id": pdf_id})
     if remaining == 0:
         await db.pdfs.delete_one({"id": pdf_id, "user_id": uid})
+        # El resumen es por PDF: al desaparecer el PDF, se borra con él (sin huérfanos).
+        await db.summaries.delete_many({"user_id": uid, "pdf_id": pdf_id})
         return True
     return False
 
@@ -1516,6 +1536,7 @@ async def delete_pdf(pdf_id: str, current_user: dict = Depends(get_current_user)
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
     await db.pdf_links.delete_many({"user_id": uid, "pdf_id": pdf_id})
+    await db.summaries.delete_many({"user_id": uid, "pdf_id": pdf_id})
     await db.questions.update_many({"pdf_source_id": pdf_id, "user_id": uid}, {"$set": {"pdf_source_id": None}})
     return {"ok": True}
 
@@ -2986,6 +3007,12 @@ async def ensure_indices():
         await db.flashcards.create_index([("user_id", 1), ("id", 1)])
         await db.flashcards.create_index([("user_id", 1), ("topic_id", 1)])
         await db.flashcards.create_index([("user_id", 1), ("subject_id", 1)])
+        # Summaries (resúmenes de IA persistidos, por PDF). Sin índice único en
+        # (pdf, scope): el "1 por PDF" se impone por app (upsert), dejando el
+        # modelo abierto a scope="topic" / varios por PDF en el futuro.
+        await db.summaries.create_index("id", unique=True)
+        await db.summaries.create_index([("user_id", 1), ("pdf_id", 1)])
+        await db.summaries.create_index([("user_id", 1), ("pdf_id", 1), ("scope", 1)])
         # Survival records — la unicidad ahora es por (user_id, scope_type, scope_id)
         await db.survival_records.create_index("id", unique=True)
         await db.survival_records.create_index("score")
@@ -3085,56 +3112,23 @@ async def save_survival_record(req: SaveSurvivalRecordReq, current_user: dict = 
 
 
 # ---------------------------------------------------------------------------
-# AI Topic Summary
+# AI Summaries (persistidos, por PDF)
 # ---------------------------------------------------------------------------
-class SummaryReq(BaseModel):
-    # None/vacío = todos los PDFs del tema (caso común, "1 clic").
-    pdf_ids: Optional[List[str]] = None
+async def _gemini_summary_content(text: str) -> dict:
+    """Llama a Gemini para resumir el texto de UN PDF y devuelve el JSON tal cual.
 
-
-@api.post("/topics/{topic_id}/summary")
-async def generate_topic_summary(
-    topic_id: str,
-    req: SummaryReq = SummaryReq(),
-    current_user: dict = Depends(get_current_user),
-):
-    """Generate a structured summary of a topic using AI.
-
-    Se genera al vuelo (no se persiste) a partir de los PDFs elegidos, o de
-    todos por defecto. `pdf_ids` se valida contra los PDFs del tema.
-    """
-    uid = current_user["id"]
-    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
-    if not topic:
-        raise HTTPException(status_code=404, detail="Tema no encontrado")
-
-    all_ids = await _topic_pdf_ids(uid, topic_id)
-    if not all_ids:
-        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
-    if req.pdf_ids:
-        selected_ids = [pid for pid in req.pdf_ids if pid in set(all_ids)]
-        if not selected_ids:
-            raise HTTPException(status_code=404, detail="No se encontraron PDFs")
-    else:
-        selected_ids = list(all_ids)
-    pdfs = await db.pdfs.find({"id": {"$in": selected_ids}, "user_id": uid}, {"_id": 0}).to_list(100)
-    if not pdfs:
-        raise HTTPException(status_code=404, detail="No hay PDFs para este tema")
-
-    if not GEMINI_API_KEY or gemini_client is None:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
-
-    # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
-
-    combined = "\n\n".join([f"=== {p['filename']} ===\n{p['text'][:30000]}" for p in pdfs])[:80000]
-
+    Reutiliza el mismo system_msg y prompt del resumen histórico. NO pasa el
+    nombre del PDF: los nombres de fichero son ruidosos ("Tema_3_v2_FINAL (1).pdf")
+    y el texto es la única fuente de verdad; un título malo solo despistaría. (El
+    prompt viejo usaba el nombre del TEMA, que sí era limpio y curado.) No gestiona
+    cuota: de eso se encarga el endpoint (comprobar/consumir/reembolsar)."""
+    combined = (text or "")[:80000]
     system_msg = (
         "Eres un profesor experto. Genera un resumen estructurado y esquemático del temario. "
         "Usa el vocabulario exacto del texto. Responde SIEMPRE en español. "
         "Devuelve SOLO JSON válido."
     )
-    prompt = f"""Resume el siguiente temario del tema "{topic['name']}" de forma estructurada.
+    prompt = f"""Resume el siguiente temario de forma estructurada.
 
 Devuelve SOLO este JSON:
 {{
@@ -3155,24 +3149,91 @@ TEMARIO:
 {combined}
 \"\"\"
 """
+    response = await gemini_client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system_msg,
+            response_mime_type="application/json",
+            temperature=0.3,
+        ),
+    )
+    _log_gemini_usage("summary", response)
+    raw = _strip_code_fences(response.text or "")
+    return json.loads(raw)
+
+
+@api.post("/pdfs/{pdf_id}/summary")
+async def generate_pdf_summary(pdf_id: str, current_user: dict = Depends(get_current_user)):
+    """Genera (o regenera) el resumen de UN PDF y lo persiste.
+
+    El resumen se keyea por pdf_id (scope="pdf") y es compartido por todos los
+    temas que contengan ese PDF. Regenerar sobrescribe. Consume 1 generación de
+    cuota (comprobada ANTES; reembolsada si Gemini falla)."""
+    uid = current_user["id"]
+    pdf = await db.pdfs.find_one({"id": pdf_id, "user_id": uid}, {"_id": 0})
+    if not pdf:
+        raise HTTPException(status_code=404, detail="PDF no encontrado")
+    if not GEMINI_API_KEY or gemini_client is None:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
+
+    # Comprobar plan + cuota ANTES de llamar a Gemini.
+    await check_and_consume_ai_quota(current_user)
     try:
-        response = await gemini_client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_msg,
-                response_mime_type="application/json",
-                temperature=0.3,
-            ),
-        )
-        _log_gemini_usage("summary", response)
-        raw = _strip_code_fences(response.text or "")
-        summary = json.loads(raw)
-        return summary
+        content = await _gemini_summary_content(pdf.get("text", ""))
     except Exception as e:
         await _refund_ai_quota(current_user)
         logger.error("Summary generation error: %s", e)
         raise HTTPException(status_code=502, detail="Error al generar el resumen")
+
+    now = datetime.now(timezone.utc).isoformat()
+    new_doc = Summary(user_id=uid, pdf_id=pdf_id, content=content)
+    # Upsert: 1 resumen por (user, pdf, scope). Regenerar sobrescribe content.
+    await db.summaries.update_one(
+        {"user_id": uid, "pdf_id": pdf_id, "scope": "pdf"},
+        {
+            "$set": {"content": content, "updated_at": now},
+            "$setOnInsert": {
+                "id": new_doc.id,
+                "user_id": uid,
+                "pdf_id": pdf_id,
+                "scope": "pdf",
+                "created_at": now,
+            },
+        },
+        upsert=True,
+    )
+    return await db.summaries.find_one(
+        {"user_id": uid, "pdf_id": pdf_id, "scope": "pdf"}, {"_id": 0}
+    )
+
+
+@api.get("/pdfs/{pdf_id}/summary")
+async def get_pdf_summary(pdf_id: str, current_user: dict = Depends(get_current_user)):
+    """Resumen cacheado de un PDF (coste 0). 404 si aún no se ha generado."""
+    uid = current_user["id"]
+    s = await db.summaries.find_one(
+        {"user_id": uid, "pdf_id": pdf_id, "scope": "pdf"}, {"_id": 0}
+    )
+    if not s:
+        raise HTTPException(status_code=404, detail="Este PDF no tiene resumen")
+    return s
+
+
+@api.get("/topics/{topic_id}/summaries")
+async def list_topic_summaries(topic_id: str, current_user: dict = Depends(get_current_user)):
+    """Resúmenes cacheados de los PDFs de un tema (coste 0), para pintar TopicDetail.
+    "Los resúmenes de un tema" = los de sus PDFs (resueltos con _topic_pdf_ids)."""
+    uid = current_user["id"]
+    topic = await db.topics.find_one({"id": topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+    pdf_ids = await _topic_pdf_ids(uid, topic_id)
+    if not pdf_ids:
+        return []
+    return await db.summaries.find(
+        {"user_id": uid, "pdf_id": {"$in": pdf_ids}, "scope": "pdf"}, {"_id": 0}
+    ).to_list(200)
 
 
 # ---------------------------------------------------------------------------
