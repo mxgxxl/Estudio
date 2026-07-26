@@ -138,16 +138,36 @@ Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **web
 - Cuestionarios con modos (examen, práctica, errores, SRS, favoritos), penalización y nota /10.
 - Repaso espaciado, flashcards, modo supervivencia, estadísticas y detector de lagunas.
 - **Autenticación** (registro/login/JWT) y **multiusuario real** (todo filtrado por `user_id`).
-- **Límites de uso de IA** por plan (`check_and_consume_ai_quota` antes de cada llamada a Gemini; 402 al superar).
+- **Límites de uso de IA por plan, en DOS contadores** (`check_and_consume_ai_quota(user, kind)` antes de cada llamada a Gemini; 402 diferenciado al superar): **generaciones** (crear material, free 30 / premium 2000) y **correcciones** (evaluar desarrollo, free 300 / premium 5000), con **ciclo unificado** (comparten `ai_period_start`, se reinician juntos). Ver sección "Cuota de IA".
 - **Pagos con Paddle (Billing v4)**: checkout con Paddle.js, webhook firmado, customer portal, cancelación programada reflejada en `/cuenta`.
 - **PDFs muchos-a-muchos + biblioteca** (Fases 1-3): un PDF se reutiliza en varios temas; pantalla `/biblioteca` para subir/gestionar PDFs sin tema.
 - **Banco de preguntas** (`/preguntas`): listado global de todas las preguntas del usuario con filtros (asignatura/tema/PDF/tipo/estado), buscador y "practicar esta selección".
+- **Modo desarrollo (respuesta abierta) completo (A-E):** crear preguntas dev desde `GenerateDialog`; `QuizSetup` consciente del tipo (disponibilidad por tipo vía `counts_by_type`, mínimo adecuado a sets pequeños); en **examen la corrección se difiere al envío** (`eval-dev-batch`, evaluación en paralelo, overlay "Corrigiendo…", sin 402 a mitad) y en **práctica es inline**; **feedback en resultados** (nota + feedback + puntos que faltaron); **editar la respuesta modelo** desde resultados (aviso "se aplica a próximos exámenes; la nota actual no cambia") y desde el banco (`EditQuestionDialog`). Respuestas en blanco = 0 sin gastar cuota.
+- **Logging de consumo de tokens de Gemini** (INFO, sin persistir): `[GEMINI-USAGE] op=<generate_questions|eval_dev|flashcards|summary> in=… out=… thoughts=… total=…` (de `response.usage_metadata`; `thoughts` = tokens de razonamiento de `gemini-2.5-flash`). Dato medido: una generación ≈ 27k tokens; una corrección ≈ 900 (~30× menos).
+- **Estadísticas rápidas y robustas** (`/stats*`): consultas reescritas — racha con una sola `distinct` (no un bucle de hasta 365 consultas), `/stats` overview en paralelo (`asyncio.gather`), y **N+1 eliminado** en `by-subject`/`by-topic`/`gaps` (una agregación `$group`). Front `Stats.jsx` con `Promise.allSettled` + carga/errores por sección. Arreglado el **500 de `/stats/gaps`** (era `$divide` por cero con preguntas sin responder; ahora compara `2*ok < ans`). El suelo de latencia se resolvió **colocando backend y Atlas en la misma región** (ver "Infra").
 
-## Qué falta / pendiente ❌
+## Qué falta / pendiente ❌ (por orden)
 
-1. **TODO-FASE3 de PDFs** (ver arriba): retirar `pdfs.topic_id` y los fallbacks transitorios una vez la migración `pdf_links` esté consolidada en todos los entornos.
-2. Mejoras de biblioteca no incluidas: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
-3. (Histórico) El SaaS base —auth, multiusuario, límites de IA, pagos— ya está implementado; ver "Qué funciona ya".
+1. **Persistir los resúmenes de IA.** Hoy `POST /topics/{id}/summary` se genera **al vuelo y NO se guarda**: vive solo en el estado de React y **se pierde al recargar** (y re-generarlo vuelve a consumir cuota). Falta persistirlo (colección/campo por tema, con las fuentes/PDFs usados) y servirlo cacheado, con opción de regenerar.
+2. **Reorganizar la navegación agrupando bajo "Biblioteca".** Unificar **PDFs + banco de preguntas + resúmenes** bajo una sección "Biblioteca" (hoy el nav tiene entradas sueltas: `/biblioteca` de PDFs y `/preguntas`). Objetivo: una "biblioteca de material" coherente (fuentes, preguntas y resúmenes del usuario) sin ensuciar la cabecera.
+3. **Deuda menor:**
+   - **TODO-FASE3 de PDFs**: retirar `pdfs.topic_id` (hoy `Optional`, solo para rollback) y los fallbacks transitorios que leen por `topic_id` (`_topic_pdf_ids`, `regenerate`, `unlink`), una vez la migración `pdf_links` esté consolidada en todos los entornos.
+   - **Endpoint `POST /subjects/{id}/topics/upload` huérfano**: crea tema + PDF + genera en un paso; ya **no se usa desde el front** (se conserva por compatibilidad y porque lo cubren tests). Retirar cuando no aporte.
+   - **Tests fósiles de Emergent**: `backend/tests/test_studyapp_backend.py` y `test_iteration4_gemini_only.py` golpean un `BASE_URL` remoto (preview de Emergent) → fallan en local/CI sin servidor. Migrarlos a in-process (TestClient + mongomock, como el resto) o retirarlos. **La suite in-process (la buena) son ~125 tests en verde**; correrla con esos ficheros da falsos negativos.
+   - Mejoras de biblioteca no incluidas: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
+
+## Infra / despliegue
+
+- **Backend y frontend en Railway, región EU West (Amsterdam)**; **MongoDB Atlas en `eu-west-3` (París)**. Colocarlos en la misma zona fue lo que quitó el suelo de ~800 ms de latencia (antes el backend estaba en US West). Cualquier servicio nuevo debe ir a EU West.
+- **Bases de datos:** producción/staging = **`studia_staging`**; desarrollo = **`studia_dev`** (variable `DB_NAME`).
+- **Migraciones y scripts**: anteponer `DB_NAME` al comando para apuntar a la BD correcta, p. ej.:
+  ```bash
+  cd backend
+  DB_NAME=studia_staging DRY_RUN=1 .venv/bin/python scripts/migrate_corrections_counter.py  # dry run
+  DB_NAME=studia_staging .venv/bin/python scripts/migrate_corrections_counter.py            # real
+  ```
+  Scripts de migración vigentes en `backend/scripts/`: `migrate_pdf_links.py`, `migrate_flashcard_source.py`, `migrate_corrections_counter.py` (todos idempotentes + `DRY_RUN`).
+- El dominio público de Railway **no cambia** al mover de región → `REACT_APP_BACKEND_URL` y el webhook de Paddle se mantienen.
 
 ## Reglas obligatorias
 
