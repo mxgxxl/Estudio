@@ -122,11 +122,8 @@ class Topic(BaseModel):
 class PdfSource(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
-    # topic_id se mantiene por compatibilidad/rollback en la Fase 1 (el backend nuevo
-    # NO lo lee: la relación PDF<->tema vive en la colección pdf_links). Se eliminará
-    # en una fase posterior cuando ya no haga falta. Opcional: un PDF de biblioteca
-    # (subido sin tema, Fase 3) nace sin topic_id ni vínculos.
-    topic_id: Optional[str] = None
+    # La atadura PDF<->tema vive EXCLUSIVAMENTE en la colección pdf_links; un PDF ya
+    # no lleva topic_id embebido (retirado tras consolidar pdf_links).
     filename: str
     text: str
     char_count: int = 0
@@ -1358,7 +1355,6 @@ async def upload_pdf_to_library(file: UploadFile = File(...), current_user: dict
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
     pdf_source = PdfSource(
         user_id=uid,
-        topic_id=None,  # PDF de biblioteca: sin tema ni vínculos aún.
         filename=file.filename,
         text=text,
         char_count=len(text),
@@ -1460,7 +1456,6 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_
         raise HTTPException(status_code=400, detail="El PDF no contiene suficiente texto extraíble")
     pdf_source = PdfSource(
         user_id=uid,
-        topic_id=topic_id,
         filename=file.filename,
         text=text,
         char_count=len(text),
