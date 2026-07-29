@@ -95,7 +95,7 @@ export default function Library() {
 
     if (pdfs === null) {
         return (
-            <div className="max-w-4xl mx-auto px-5 md:px-8 py-10" style={{ color: "var(--text-muted)" }}>
+            <div style={{ color: "var(--text-muted)" }}>
                 Cargando…
             </div>
         );
@@ -106,17 +106,13 @@ export default function Library() {
     );
 
     return (
-        <div className="max-w-4xl mx-auto px-5 md:px-8 py-8 md:py-12">
-            <div className="flex items-start justify-between gap-4 mb-2">
-                <div>
-                    <span className="label-eyebrow">Tus fuentes</span>
-                    <h1 className="font-display text-3xl md:text-4xl font-bold mt-1">Biblioteca</h1>
-                </div>
+        <div>
+            <div className="flex items-start justify-between gap-4 mb-6">
+                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                    Aquí se guardan todos tus PDFs. Súbelos una vez y úsalos en los temas que quieras.
+                </p>
                 {pdfs.length > 0 && <UploadButton />}
             </div>
-            <p className="text-sm mb-8" style={{ color: "var(--text-secondary)" }}>
-                Aquí se guardan todos tus PDFs. Súbelos una vez y úsalos en los temas que quieras.
-            </p>
 
             {pdfs.length === 0 ? (
                 // Estado vacío: explica para qué sirve la pantalla, no una página en blanco.

@@ -191,6 +191,8 @@ export const getPdfSummary = (pdfId) =>
     api.get(`/pdfs/${pdfId}/summary`).then((r) => r.data);
 export const getTopicSummaries = (topicId) =>
     api.get(`/topics/${topicId}/summaries`).then((r) => r.data);
+// Lista global de todos mis resúmenes (coste 0), para la pestaña Resúmenes.
+export const listSummaries = () => api.get("/summaries").then((r) => r.data);
 
 // Gap detector
 export const getKnowledgeGaps = () => api.get("/stats/gaps", { timeout: STATS_TIMEOUT }).then((r) => r.data);

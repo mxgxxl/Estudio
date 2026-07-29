@@ -186,12 +186,11 @@ export default function QuestionBank() {
     const selectStyle = { borderColor: "var(--border)" };
 
     return (
-        <div className="max-w-4xl mx-auto px-5 md:px-8 py-8 md:py-12">
-            <div className="flex items-start justify-between gap-4 mb-2">
-                <div>
-                    <span className="label-eyebrow">Tu material</span>
-                    <h1 className="font-display text-3xl md:text-4xl font-bold mt-1">Banco de preguntas</h1>
-                </div>
+        <div>
+            <div className="flex items-start justify-between gap-4 mb-6">
+                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                    Todas tus preguntas generadas, en un solo sitio. Filtra, busca y practica lo que quieras.
+                </p>
                 <button
                     onClick={practiceSelection}
                     disabled={practicing || total === 0}
@@ -202,9 +201,6 @@ export default function QuestionBank() {
                     Practicar selección
                 </button>
             </div>
-            <p className="text-sm mb-6" style={{ color: "var(--text-secondary)" }}>
-                Todas tus preguntas generadas, en un solo sitio. Filtra, busca y practica lo que quieras.
-            </p>
 
             {/* Buscador */}
             <div className="relative mb-3">
