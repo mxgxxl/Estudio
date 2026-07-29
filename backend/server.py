@@ -3236,6 +3236,68 @@ async def list_topic_summaries(topic_id: str, current_user: dict = Depends(get_c
     ).to_list(200)
 
 
+@api.get("/summaries")
+async def list_all_summaries(current_user: dict = Depends(get_current_user)):
+    """Lista global de TODOS los resúmenes del usuario (coste 0), para la pestaña
+    Resúmenes de Biblioteca.
+
+    Un resumen se keyea por pdf_id y es compartido: sus asignaturas/temas se
+    DERIVAN vía pdf_links (no hay topic_id en el summary), así que un mismo
+    resumen puede pertenecer a varias. Cada fila incluye nombre de PDF, la lista
+    de subjects/topics, el content y las fechas. Ordenado por updated_at desc."""
+    uid = current_user["id"]
+    sums = await db.summaries.find(
+        {"user_id": uid, "scope": "pdf"}, {"_id": 0}
+    ).to_list(2000)
+    if not sums:
+        return []
+
+    pdf_ids = list({s["pdf_id"] for s in sums})
+    pdfs = await db.pdfs.find(
+        {"user_id": uid, "id": {"$in": pdf_ids}}, {"_id": 0, "id": 1, "filename": 1}
+    ).to_list(2000)
+    fname = {p["id"]: p["filename"] for p in pdfs}
+
+    links = await db.pdf_links.find(
+        {"user_id": uid, "pdf_id": {"$in": pdf_ids}}, {"_id": 0}
+    ).to_list(10000)
+    subj_ids = list({l["subject_id"] for l in links if l.get("subject_id")})
+    topic_ids = list({l["topic_id"] for l in links})
+    subjects = await db.subjects.find(
+        {"user_id": uid, "id": {"$in": subj_ids}}, {"_id": 0, "id": 1, "name": 1}
+    ).to_list(2000)
+    topics = await db.topics.find(
+        {"user_id": uid, "id": {"$in": topic_ids}}, {"_id": 0, "id": 1, "name": 1}
+    ).to_list(4000)
+    sname = {s["id"]: s["name"] for s in subjects}
+    tname = {t["id"]: t["name"] for t in topics}
+
+    # Agrupa asignaturas/temas por pdf_id (dedup con dict {id: name}).
+    by_pdf_subj: dict = {}
+    by_pdf_topic: dict = {}
+    for l in links:
+        pid = l["pdf_id"]
+        if l.get("subject_id"):
+            by_pdf_subj.setdefault(pid, {})[l["subject_id"]] = sname.get(l["subject_id"])
+        by_pdf_topic.setdefault(pid, {})[l["topic_id"]] = tname.get(l["topic_id"])
+
+    out = []
+    for s in sums:
+        pid = s["pdf_id"]
+        out.append({
+            "id": s["id"],
+            "pdf_id": pid,
+            "pdf_filename": fname.get(pid),
+            "subjects": [{"id": k, "name": v} for k, v in by_pdf_subj.get(pid, {}).items()],
+            "topics": [{"id": k, "name": v} for k, v in by_pdf_topic.get(pid, {}).items()],
+            "content": s["content"],
+            "created_at": s.get("created_at"),
+            "updated_at": s.get("updated_at"),
+        })
+    out.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Gap Detector
 # ---------------------------------------------------------------------------
