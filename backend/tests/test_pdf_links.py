@@ -429,13 +429,15 @@ class TestLibraryUpload:
         body = r.json()
         pid = body["id"]
         assert body["link_count"] == 0 and body["topic_ids"] == [] and body["question_count"] == 0
-        # Existe en la biblioteca, sin vínculos y sin topic_id.
+        # Existe en la biblioteca y NO está vinculado a ningún tema (la atadura
+        # vive solo en pdf_links, que aquí está vacía).
         assert _pdf_exists(srv, uid, pid)
         assert _links_count(srv, uid, pid) == 0
         lib = _list_pdfs(client, h)
         assert pid in lib and lib[pid]["link_count"] == 0
-        doc = asyncio.run(srv.db.pdfs.find_one({"id": pid}, {"_id": 0, "topic_id": 1}))
-        assert doc.get("topic_id") is None
+        # El doc de pdfs ya no lleva el campo topic_id (retirado).
+        doc = asyncio.run(srv.db.pdfs.find_one({"id": pid}, {"_id": 0}))
+        assert "topic_id" not in doc
 
     def test_library_pdf_survives_topic_and_subject_deletion(self, client, srv):
         uid = _register(client, "l3b@t.com")

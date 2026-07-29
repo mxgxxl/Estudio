@@ -1261,22 +1261,11 @@ async def topic_questions(topic_id: str, current_user: dict = Depends(get_curren
 # ---- PDF sources ----
 # Helpers de la relación muchos-a-muchos PDF<->tema (colección pdf_links).
 async def _topic_pdf_ids(uid: str, topic_id: str) -> List[str]:
-    """IDs de los PDFs asociados a un tema, leídos de pdf_links.
-
-    TODO-FASE3: fallback transitorio. Si el tema no tiene ninguna pdf_link (datos
-    aún sin migrar), cae a la relación antigua embebida pdfs.topic_id. Eliminar
-    este fallback cuando la migración a pdf_links esté garantizada en todos los
-    entornos y se retire pdfs.topic_id."""
+    """IDs de los PDFs asociados a un tema, leídos de pdf_links (única fuente)."""
     links = await db.pdf_links.find(
         {"user_id": uid, "topic_id": topic_id}, {"_id": 0, "pdf_id": 1}
     ).to_list(1000)
-    if links:
-        return [l["pdf_id"] for l in links]
-    # TODO-FASE3: relación antigua embebida (pre-migración).
-    legacy = await db.pdfs.find(
-        {"user_id": uid, "topic_id": topic_id}, {"_id": 0, "id": 1}
-    ).to_list(1000)
-    return [p["id"] for p in legacy]
+    return [l["pdf_id"] for l in links]
 
 
 async def _link_pdf_to_topic(uid: str, pdf_id: str, topic_id: str, subject_id: Optional[str]) -> None:
@@ -1383,10 +1372,9 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dic
     pdf = await db.pdfs.find_one({"id": pdf_id, "user_id": uid}, {"_id": 0})
     if not pdf:
         raise HTTPException(status_code=404, detail="PDF no encontrado")
-    # Resolver el tema al que regenerar vía pdf_links (en Fase 1 hay uno solo).
-    # TODO-FASE3: fallback a pdf.topic_id mientras existan PDFs sin migrar.
+    # Resolver el tema al que regenerar vía pdf_links (única fuente de la atadura).
     link = await db.pdf_links.find_one({"user_id": uid, "pdf_id": pdf_id}, {"_id": 0, "topic_id": 1})
-    resolved_topic_id = link["topic_id"] if link else pdf.get("topic_id")
+    resolved_topic_id = link["topic_id"] if link else None
     topic = await db.topics.find_one({"id": resolved_topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
@@ -1464,7 +1452,6 @@ async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_
     await _link_pdf_to_topic(uid, pdf_source.id, topic_id, topic.get("subject_id"))
     return {
         "id": pdf_source.id,
-        "topic_id": topic_id,
         "filename": pdf_source.filename,
         "char_count": pdf_source.char_count,
         "created_at": pdf_source.created_at,
@@ -1504,15 +1491,8 @@ async def unlink_pdf_from_topic(topic_id: str, pdf_id: str, current_user: dict =
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
     res = await db.pdf_links.delete_one({"user_id": uid, "pdf_id": pdf_id, "topic_id": topic_id})
-    # TODO-FASE3: caso legacy — PDF que pertenece al tema por pdfs.topic_id sin
-    # pdf_link (datos pre-migración). Lo desvinculamos quitando también topic_id.
-    legacy = await db.pdfs.find_one(
-        {"id": pdf_id, "user_id": uid, "topic_id": topic_id}, {"_id": 0, "id": 1}
-    )
-    if res.deleted_count == 0 and not legacy:
+    if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="El PDF no está en este tema")
-    if legacy:
-        await db.pdfs.update_one({"id": pdf_id, "user_id": uid}, {"$unset": {"topic_id": ""}})
     pdf_deleted = await _delete_pdf_if_orphan(uid, pdf_id)
     if pdf_deleted:
         await db.questions.update_many(
@@ -2859,11 +2839,9 @@ async def ensure_indices():
         await db.topics.create_index("subject_id")
         await db.topics.create_index([("user_id", 1), ("id", 1)])
         await db.topics.create_index([("user_id", 1), ("subject_id", 1)])
-        # PDFs
+        # PDFs (la atadura a temas vive en pdf_links, no en pdfs.topic_id)
         await db.pdfs.create_index("id", unique=True)
-        await db.pdfs.create_index("topic_id")
         await db.pdfs.create_index([("user_id", 1), ("id", 1)])
-        await db.pdfs.create_index([("user_id", 1), ("topic_id", 1)])
         # PDF links (relación muchos-a-muchos PDF<->tema)
         await db.pdf_links.create_index("id", unique=True)
         await db.pdf_links.create_index([("user_id", 1), ("topic_id", 1)])

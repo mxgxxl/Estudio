@@ -64,12 +64,17 @@ una sola vez en `pdfs` (ahorra espacio en Atlas M0 al no duplicar). Reglas clave
   biblioteca con `link_count 0` es estable y seguro (ninguna cascada lo toca).
 - Al borrar/desvincular un PDF, sus preguntas NO se borran: solo pierden la referencia
   (`pdf_source_id = None`).
-- **Migración**: `backend/scripts/migrate_pdf_links.py` (aditiva, idempotente, `DRY_RUN=1`)
-  crea `pdf_links` desde el antiguo `pdfs.topic_id`.
-- ⚠️ **TODO-FASE3 pendiente** (buscar `TODO-FASE3` en `server.py`): retirar `pdfs.topic_id`
-  (hoy `Optional`, conservado solo para rollback) y los **fallbacks transitorios** que leen
-  por `topic_id` cuando un PDF aún no tiene vínculos (en `_topic_pdf_ids`, `regenerate` y
-  `unlink`). Hacerlo solo cuando la migración esté garantizada en todos los entornos.
+- **Migración (histórica)**: `backend/scripts/migrate_pdf_links.py` (aditiva, idempotente,
+  `DRY_RUN=1`) creó `pdf_links` desde el antiguo `pdfs.topic_id`.
+- ✅ **`pdfs.topic_id` RETIRADO**: la atadura PDF↔tema vive **exclusivamente** en `pdf_links`.
+  Se eliminó el campo del modelo `PdfSource`, sus escrituras, los fallbacks de lectura
+  transitorios (`_topic_pdf_ids`, `regenerate_from_pdf`, `unlink_pdf_from_topic`) y los 2
+  índices (`pdfs.topic_id_1`, `pdfs.user_id_1_topic_id_1`). `unlink_pdf_from_topic` sin link
+  que borrar responde **404** ("El PDF no está en este tema"). Verificación previa (puerta) y
+  retirada de datos en scripts: `verify_topic_id_retirement.py` (solo-lectura; conteo crítico
+  = PDFs con `topic_id` sin `pdf_link` que lo respalde, debe ser 0) y
+  `migrate_drop_pdf_topic_id.py` (`$unset` del campo + drop de índices tolerante; `DRY_RUN=1`
+  por defecto, real con `DRY_RUN=0`). Orden: desplegar código → correr la puerta → `$unset`.
 
 ### Variables de entorno
 - Backend (base): `MONGO_URL`, `DB_NAME`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CORS_ORIGINS`, `LOG_LEVEL` (por defecto `INFO`; súbelo a `DEBUG` para ver las trazas rutinarias, p. ej. las de Paddle).
@@ -155,7 +160,7 @@ Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **web
 ## Qué falta / pendiente ❌ (por orden)
 
 1. **Deuda menor:**
-   - **TODO-FASE3 de PDFs** (pendiente, mini-migración aparte): retirar `pdfs.topic_id` (hoy `Optional`, solo para rollback) y los fallbacks transitorios que leen por `topic_id` (`_topic_pdf_ids`, `regenerate`, `unlink`), una vez la migración `pdf_links` esté consolidada en todos los entornos.
+   - ~~TODO-FASE3 de PDFs: retirar `pdfs.topic_id`~~ → **hecho** (campo, escrituras, 3 fallbacks de lectura y 2 índices retirados; atadura exclusiva en `pdf_links`). Falta solo ejecutar el `$unset` de datos existentes con `migrate_drop_pdf_topic_id.py` (`DRY_RUN=0`) en cada entorno tras desplegar, previa puerta `verify_topic_id_retirement.py` en 0.
    - ~~Endpoint legacy `POST /subjects/{id}/topics/upload` huérfano~~ → **retirado** (código muerto: sin caller en el frontend; los setups de test se recablearon al flujo real de dos/tres pasos).
    - ~~Tests fósiles de Emergent~~ → **eliminados** (eran 3: `test_studyapp_backend.py`, `test_iteration4_gemini_only.py`, `test_iteration3_batching_penalty.py`; golpeaban un `BASE_URL` remoto vía `requests`). La suite in-process es de **~131 tests en verde** y ya **no requiere `--ignore`**: todo `backend/tests/` pasa en limpio.
    - Mejoras de biblioteca no incluidas: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
