@@ -84,7 +84,7 @@ Todos cuelgan de un `APIRouter(prefix="/api")`. Diagnóstico: `GET /api/diag/llm
 
 **Temas (creación desacoplada de los PDFs):**
 - `POST /api/subjects/{subject_id}/topics` — crea un tema **vacío** (solo `name`, JSON). No toca `pdfs`/`pdf_links`, **no llama a Gemini** → sin cuota. Es el camino que usa la UI para crear temas.
-- `POST /api/subjects/{subject_id}/topics/upload` — **(legacy)** crea tema + PDF + genera preguntas en un solo paso (multipart, consume cuota). Ya **no se usa desde el frontend**; se conserva por compatibilidad y porque lo cubren los tests.
+- El flujo real es en pasos: crear tema vacío → subir PDF (`POST /api/topics/{id}/pdfs/upload`) → generar preguntas (`POST /api/topics/{id}/generate`). El antiguo `POST /subjects/{subject_id}/topics/upload` (multipart, creaba tema + PDF + generaba en un paso, consumía cuota) **se retiró** por código muerto: no lo usaba el frontend y solo lo sostenían setups de test, ahora recableados al flujo real.
 
 **PDFs / biblioteca (Fases 1-3):**
 - `GET /api/pdfs` — biblioteca del usuario: todos sus PDFs (sin `text`) con `link_count` y `topic_ids`.
@@ -155,9 +155,9 @@ Sin SDK de servidor: **checkout con Paddle.js** (overlay) en el frontend y **web
 ## Qué falta / pendiente ❌ (por orden)
 
 1. **Deuda menor:**
-   - **TODO-FASE3 de PDFs**: retirar `pdfs.topic_id` (hoy `Optional`, solo para rollback) y los fallbacks transitorios que leen por `topic_id` (`_topic_pdf_ids`, `regenerate`, `unlink`), una vez la migración `pdf_links` esté consolidada en todos los entornos.
-   - **Endpoint `POST /subjects/{id}/topics/upload` huérfano**: crea tema + PDF + genera en un paso; ya **no se usa desde el front** (se conserva por compatibilidad y porque lo cubren tests). Retirar cuando no aporte.
-   - **Tests fósiles de Emergent (TRES)**: `backend/tests/test_studyapp_backend.py`, `test_iteration4_gemini_only.py` y `test_iteration3_batching_penalty.py` golpean un `BASE_URL` remoto (preview de Emergent) vía `requests` → fallan en local/CI sin servidor. Migrarlos a in-process (TestClient + mongomock, como el resto) o retirarlos. **La suite in-process (la buena) son ~131 tests en verde**; correrla con esos ficheros da falsos negativos. Excluirlos con `--ignore` de los tres.
+   - **TODO-FASE3 de PDFs** (pendiente, mini-migración aparte): retirar `pdfs.topic_id` (hoy `Optional`, solo para rollback) y los fallbacks transitorios que leen por `topic_id` (`_topic_pdf_ids`, `regenerate`, `unlink`), una vez la migración `pdf_links` esté consolidada en todos los entornos.
+   - ~~Endpoint legacy `POST /subjects/{id}/topics/upload` huérfano~~ → **retirado** (código muerto: sin caller en el frontend; los setups de test se recablearon al flujo real de dos/tres pasos).
+   - ~~Tests fósiles de Emergent~~ → **eliminados** (eran 3: `test_studyapp_backend.py`, `test_iteration4_gemini_only.py`, `test_iteration3_batching_penalty.py`; golpeaban un `BASE_URL` remoto vía `requests`). La suite in-process es de **~131 tests en verde** y ya **no requiere `--ignore`**: todo `backend/tests/` pasa en limpio.
    - Mejoras de biblioteca no incluidas: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
    - **Borrar un resumen suelto conservando el PDF**: hoy no existe (un resumen solo desaparece con su PDF; se regenera encima). No se necesita; añadir solo si surge la demanda.
 

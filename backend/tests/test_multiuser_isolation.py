@@ -85,14 +85,25 @@ def _create_subject(client, headers, name):
 
 
 def _upload_topic(client, headers, subject_id, name):
-    r = client.post(
-        f"/api/subjects/{subject_id}/topics/upload",
-        data={"name": name, "num_questions": "3", "question_type": "mcq", "num_options": "3"},
+    """Flujo real de la app: crea tema vacío, sube un PDF y genera preguntas
+    (tres pasos). Devuelve el tema (dict). Las preguntas hacen falta para los
+    tests de aislamiento/acciones sobre preguntas."""
+    t = client.post(f"/api/subjects/{subject_id}/topics", json={"name": name}, headers=headers)
+    assert t.status_code == 200, t.text
+    topic = t.json()
+    up = client.post(
+        f"/api/topics/{topic['id']}/pdfs/upload",
         files={"file": ("t.pdf", b"%PDF-1.4 fake", "application/pdf")},
         headers=headers,
     )
-    assert r.status_code == 200, r.text
-    return r.json()["topic"]
+    assert up.status_code == 200, up.text
+    g = client.post(
+        f"/api/topics/{topic['id']}/generate",
+        json={"pdf_ids": [up.json()["id"]], "num_questions": 3},
+        headers=headers,
+    )
+    assert g.status_code == 200, g.text
+    return topic
 
 
 # --------------------------------------------------------------------------

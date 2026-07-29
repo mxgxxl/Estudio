@@ -23,7 +23,7 @@ api.interceptors.request.use((config) => {
 // correcta. `eval-dev(-batch)?` cubre la corrección individual (práctica) y la
 // del envío de examen (batch); esta última no casaba y por eso la cabecera no
 // se actualizaba sola al terminar un examen con preguntas de desarrollo.
-const AI_GEN_URL_RE = /(\/topics\/upload|\/regenerate|\/generate|\/summary|\/eval-dev(-batch)?)$/;
+const AI_GEN_URL_RE = /(\/regenerate|\/generate|\/summary|\/eval-dev(-batch)?)$/;
 
 api.interceptors.response.use(
     (r) => {

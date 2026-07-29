@@ -85,17 +85,15 @@ def _subject(client, h, name):
 
 
 def _topic_two_pdfs(client, h, sid):
-    r = client.post(
-        f"/api/subjects/{sid}/topics/upload",
-        data={"name": "Tema", "num_questions": "3", "question_type": "mcq", "num_options": "3"},
-        files={"file": ("a.pdf", b"%PDF-1.4 A", "application/pdf")},
-        headers=h,
-    )
-    assert r.status_code == 200, r.text
-    tid, a = r.json()["topic"]["id"], r.json()["pdf_id"]
-    r = client.post(f"/api/topics/{tid}/pdfs/upload", files={"file": ("b.pdf", b"%PDF-1.4 B", "application/pdf")}, headers=h)
-    assert r.status_code == 200, r.text
-    return tid, a, r.json()["id"]
+    """Flujo real: crea el tema vacío y le sube 2 PDFs. Devuelve (topic_id, a, b)."""
+    t = client.post(f"/api/subjects/{sid}/topics", json={"name": "Tema"}, headers=h)
+    assert t.status_code == 200, t.text
+    tid = t.json()["id"]
+    ra = client.post(f"/api/topics/{tid}/pdfs/upload", files={"file": ("a.pdf", b"%PDF-1.4 A", "application/pdf")}, headers=h)
+    assert ra.status_code == 200, ra.text
+    rb = client.post(f"/api/topics/{tid}/pdfs/upload", files={"file": ("b.pdf", b"%PDF-1.4 B", "application/pdf")}, headers=h)
+    assert rb.status_code == 200, rb.text
+    return tid, ra.json()["id"], rb.json()["id"]
 
 
 def test_generate_and_cache(client):

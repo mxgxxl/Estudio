@@ -84,11 +84,28 @@ def _create_subject(client, headers, name):
     return r.json()
 
 
-def _upload_topic(client, headers, subject_id, name):
-    return client.post(
-        f"/api/subjects/{subject_id}/topics/upload",
-        data={"name": name, "num_questions": "3", "question_type": "mcq", "num_options": "3"},
+def _topic_with_pdf(client, headers, subject_id, name):
+    """Flujo real en dos pasos: crea tema vacío + sube un PDF. NINGUNO consume
+    cuota (a diferencia del antiguo endpoint topics/upload, que generaba). Devuelve
+    (topic_id, pdf_id)."""
+    t = client.post(f"/api/subjects/{subject_id}/topics", json={"name": name}, headers=headers)
+    assert t.status_code == 200, t.text
+    tid = t.json()["id"]
+    up = client.post(
+        f"/api/topics/{tid}/pdfs/upload",
         files={"file": ("t.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        headers=headers,
+    )
+    assert up.status_code == 200, up.text
+    return tid, up.json()["id"]
+
+
+def _generate(client, headers, topic_id, pdf_id):
+    """Genera preguntas desde un PDF del tema. CONSUME 1 generación (y reembolsa
+    si Gemini falla) — es la acción real que sustituye al viejo topics/upload."""
+    return client.post(
+        f"/api/topics/{topic_id}/generate",
+        json={"pdf_ids": [pdf_id], "num_questions": 3},
         headers=headers,
     )
 
@@ -119,11 +136,14 @@ class TestAiQuota:
         h = _login(client, "free1@test.com")
         sub = _create_subject(client, h, "Asig free1")
 
-        # 1ª generación: upload_topic consume 1 -> used=1.
-        up = _upload_topic(client, h, sub["id"], "Tema 1")
-        assert up.status_code == 200, up.text
-        topic_id = up.json()["topic"]["id"]
+        # Crear tema + subir PDF NO consume cuota (used sigue en 0).
+        topic_id, pdf_id = _topic_with_pdf(client, h, sub["id"], "Tema 1")
+        usage = client.get("/api/usage/me", headers=h).json()
+        assert usage["used"] == 0 and usage["remaining"] == FREE_LIMIT
 
+        # 1ª generación (preguntas): consume 1 -> used=1.
+        g = _generate(client, h, topic_id, pdf_id)
+        assert g.status_code == 200, g.text
         usage = client.get("/api/usage/me", headers=h).json()
         assert usage["used"] == 1 and usage["remaining"] == FREE_LIMIT - 1
 
@@ -156,8 +176,9 @@ class TestAiQuota:
         assert usage_before["used"] == 0
 
         sub = client.get("/api/subjects", headers=h).json()[0]
-        up = _upload_topic(client, h, sub["id"], "Tema tras reset")
-        assert up.status_code == 200, up.text
+        topic_id, pdf_id = _topic_with_pdf(client, h, sub["id"], "Tema tras reset")
+        g = _generate(client, h, topic_id, pdf_id)
+        assert g.status_code == 200, g.text
 
         u = client.get("/api/usage/me", headers=h).json()
         assert u["used"] == 1  # contador reiniciado y consumido 1
@@ -166,6 +187,8 @@ class TestAiQuota:
         assert _register(client, "free2@test.com").status_code == 201
         h = _login(client, "free2@test.com")
         sub = _create_subject(client, h, "Asig free2")
+        # Tema + PDF sin cuota; el consumo ocurre en la generación de abajo.
+        topic_id, pdf_id = _topic_with_pdf(client, h, sub["id"], "Tema que falla")
 
         before = client.get("/api/usage/me", headers=h).json()["used"]
         assert before == 0
@@ -180,7 +203,7 @@ class TestAiQuota:
             # El fallo se propaga (no es 402). TestClient re-lanza la excepción
             # del servidor; lo importante es que el endpoint reembolse antes.
             with pytest.raises(RuntimeError):
-                _upload_topic(client, h, sub["id"], "Tema que falla")
+                _generate(client, h, topic_id, pdf_id)
         finally:
             srv.generate_questions_with_claude = orig
 

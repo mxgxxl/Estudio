@@ -67,16 +67,26 @@ def _subject(client, h, name):
 
 
 def _upload_topic(client, h, subject_id, name):
-    """Crea tema + PDF (y su vínculo). Devuelve (topic_id, pdf_id)."""
-    r = client.post(
-        f"/api/subjects/{subject_id}/topics/upload",
-        data={"name": name, "num_questions": "3", "question_type": "mcq", "num_options": "3"},
+    """Crea tema + PDF (y su vínculo) y genera preguntas, por el flujo real en
+    tres pasos. Genera para que las preguntas queden con pdf_source_id = pdf_id
+    (lo necesitan los tests de desvinculación). Devuelve (topic_id, pdf_id)."""
+    t = client.post(f"/api/subjects/{subject_id}/topics", json={"name": name}, headers=h)
+    assert t.status_code == 200, t.text
+    tid = t.json()["id"]
+    up = client.post(
+        f"/api/topics/{tid}/pdfs/upload",
         files={"file": ("t.pdf", b"%PDF-1.4 fake", "application/pdf")},
         headers=h,
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    return body["topic"]["id"], body["pdf_id"]
+    assert up.status_code == 200, up.text
+    pid = up.json()["id"]
+    g = client.post(
+        f"/api/topics/{tid}/generate",
+        json={"pdf_ids": [pid], "num_questions": 3},
+        headers=h,
+    )
+    assert g.status_code == 200, g.text
+    return tid, pid
 
 
 def _add_pdf(client, h, topic_id):

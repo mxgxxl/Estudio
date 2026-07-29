@@ -79,14 +79,18 @@ def _subject(client, h, name):
 
 
 def _topic_with_pdf(client, h, sid, tname="Tema", fn="a.pdf"):
-    r = client.post(
-        f"/api/subjects/{sid}/topics/upload",
-        data={"name": tname, "num_questions": "3", "question_type": "mcq", "num_options": "3"},
+    """Flujo real de la app en dos pasos: crea el tema vacío y le sube un PDF
+    (ninguno consume cuota). Devuelve (topic_id, pdf_id)."""
+    t = client.post(f"/api/subjects/{sid}/topics", json={"name": tname}, headers=h)
+    assert t.status_code == 200, t.text
+    tid = t.json()["id"]
+    up = client.post(
+        f"/api/topics/{tid}/pdfs/upload",
         files={"file": (fn, b"%PDF-1.4 A", "application/pdf")},
         headers=h,
     )
-    assert r.status_code == 200, r.text
-    return r.json()["topic"]["id"], r.json()["pdf_id"]
+    assert up.status_code == 200, up.text
+    return tid, up.json()["id"]
 
 
 def test_empty_when_no_summaries(client):
