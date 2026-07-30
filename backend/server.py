@@ -192,6 +192,10 @@ class Question(BaseModel):
 class Attempt(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
+    # Dos ejes (Fase 1). `mode` se conserva DERIVADO como puente hasta la Fase 2
+    # (stats aún lee attempt.mode); se retirará al migrar el histórico y stats.
+    selection: Literal["all", "errors", "srs", "favorites"] = "all"
+    behavior: Literal["practice", "exam"] = "practice"
     mode: Literal["exam", "practice", "errors", "srs", "favorites"]
     subject_ids: List[str] = []
     topic_ids: List[str] = []
@@ -1894,8 +1898,52 @@ async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_
 
 
 # ---- Quiz ----
+# Dos ejes del estudio (Fase 1): SELECCIÓN (qué preguntas) × COMPORTAMIENTO (cómo
+# se juega). El backend solo usa `selection` para elegir preguntas; `behavior` se
+# persiste. El viejo `mode` (un único string que conflaciaba ambos) se acepta por
+# compat durante el despliegue y se deriva/escribe como puente hasta la Fase 2.
+_QUIZ_SELECTIONS = ("all", "errors", "srs", "favorites")
+_QUIZ_BEHAVIORS = ("practice", "exam")
+_MODE_TO_AXES = {
+    "exam": ("all", "exam"),
+    "practice": ("all", "practice"),
+    "errors": ("errors", "practice"),
+    "srs": ("srs", "practice"),
+    "favorites": ("favorites", "practice"),
+}
+
+
+def _resolve_quiz_axes(mode: Optional[str], selection: Optional[str], behavior: Optional[str]):
+    """Resuelve (selection, behavior) aceptando los ejes nuevos O el `mode` viejo.
+    Prioriza los ejes nuevos; cae al mapeo de compat si solo llega `mode`."""
+    if selection in _QUIZ_SELECTIONS:
+        beh = behavior if behavior in _QUIZ_BEHAVIORS else "practice"
+        return selection, beh
+    if mode in _MODE_TO_AXES:
+        return _MODE_TO_AXES[mode]
+    return ("all", "practice")
+
+
+def _derive_mode(selection: str, behavior: str) -> str:
+    """Deriva el `mode` viejo desde los dos ejes (puente hasta Fase 2, para no
+    romper el label de "intentos recientes" en stats, que lee attempt.mode).
+
+    LOSSY a propósito: es un único campo para dos ejes, así que combinaciones
+    nuevas como behavior=exam+selection=errors se colapsan a "exam" (se pierde
+    "errors"). Aceptable como puente: esas combinaciones no existen hasta la Fase 3
+    y `mode` se retira en la Fase 2 (stats pasará a leer selection/behavior), antes
+    de que puedan crearse."""
+    if behavior == "exam":
+        return "exam"
+    return "practice" if selection == "all" else selection
+
+
 class QuizStartReq(BaseModel):
-    mode: Literal["exam", "practice", "errors", "srs", "favorites"]
+    # `mode` viejo (compat, opcional) + ejes nuevos. Al menos uno debe permitir
+    # resolver la selección; si no llega ninguno se asume ("all","practice").
+    mode: Optional[Literal["exam", "practice", "errors", "srs", "favorites"]] = None
+    selection: Optional[Literal["all", "errors", "srs", "favorites"]] = None
+    behavior: Optional[Literal["practice", "exam"]] = None
     subject_ids: List[str] = []
     topic_ids: List[str] = []
     num_questions: int = 20
@@ -1909,6 +1957,7 @@ class QuizStartReq(BaseModel):
 
 @api.post("/quiz/start")
 async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
+    selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
     query: dict = {"user_id": current_user["id"]}
 
     if req.question_ids:
@@ -1926,11 +1975,12 @@ async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current
         if req.num_options:
             query["num_options"] = int(req.num_options)
 
-        if req.mode == "errors":
+        # La SELECCIÓN decide qué preguntas (el behavior no interviene aquí).
+        if selection == "errors":
             query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
-        elif req.mode == "favorites":
+        elif selection == "favorites":
             query["favorite"] = True
-        elif req.mode == "srs":
+        elif selection == "srs":
             now = _now_iso()
             query["srs_next_review"] = {"$lte": now}
 
@@ -1998,11 +2048,21 @@ async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current
                 "favorite": q.get("favorite", False),
                 "difficult": q.get("difficult", False),
             })
-    return {"questions": payload, "mode": req.mode}
+    # Aditivo: ejes nuevos + `mode` derivado (compat con el frontend viejo, que
+    # solo lee `data.questions`).
+    return {
+        "questions": payload,
+        "selection": selection,
+        "behavior": behavior,
+        "mode": _derive_mode(selection, behavior),
+    }
 
 
 class QuizSubmitReq(BaseModel):
-    mode: Literal["exam", "practice", "errors", "srs", "favorites"]
+    # `mode` viejo (compat) + ejes nuevos; se resuelven con _resolve_quiz_axes.
+    mode: Optional[Literal["exam", "practice", "errors", "srs", "favorites"]] = None
+    selection: Optional[Literal["all", "errors", "srs", "favorites"]] = None
+    behavior: Optional[Literal["practice", "exam"]] = None
     subject_ids: List[str] = []
     topic_ids: List[str] = []
     answers: List[dict]
@@ -2033,6 +2093,7 @@ def _update_srs(q: dict, correct: bool) -> dict:
 @api.post("/quiz/submit")
 async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
+    selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
     correct = 0
     wrong = 0
     unanswered = 0
@@ -2062,13 +2123,15 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         q = await db.questions.find_one({"id": qid, "user_id": uid}, {"_id": 0})
         if not q:
             continue
+        set_fields = {"last_answered_at": _now_iso(), "last_correct": is_correct}
+        # El estado SRS (ease/interval/next_review) SOLO avanza en la selección de
+        # Repaso. En cualquier otra (examen, errores, favoritas, todas) responder NO
+        # toca el SRS ya establecido de la pregunta.
+        if selection == "srs":
+            set_fields.update(_update_srs(q, is_correct))
         update = {
             "$inc": {"times_answered": 1, **(({"times_correct": 1}) if is_correct else {})},
-            "$set": {
-                "last_answered_at": _now_iso(),
-                "last_correct": is_correct,
-                **_update_srs(q, is_correct),
-            },
+            "$set": set_fields,
         }
         await db.questions.update_one({"id": qid, "user_id": uid}, update)
 
@@ -2085,7 +2148,10 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
     today = datetime.now(timezone.utc).date().isoformat()
     attempt = Attempt(
         user_id=uid,
-        mode=req.mode,
+        selection=selection,
+        behavior=behavior,
+        # `mode` derivado como puente hasta Fase 2 (stats aún lee attempt.mode).
+        mode=_derive_mode(selection, behavior),
         subject_ids=req.subject_ids,
         topic_ids=req.topic_ids,
         question_ids=[a.get("question_id") for a in req.answers],
