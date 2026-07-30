@@ -673,6 +673,16 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
 # Campo del contador por tipo; el periodo es siempre `ai_period_start`.
 _QUOTA_FIELD = {"generation": "ai_generations_used", "correction": "ai_corrections_used"}
 
+# Sub-contador de "crear material" por tipo de generación. La suma de los tres es
+# SIEMPRE == ai_generations_used (invariante). Todos se reinician con el ciclo.
+_GEN_SUBFIELD = {
+    "questions": "ai_gen_questions_used",
+    "summaries": "ai_gen_summaries_used",
+    "flashcards": "ai_gen_flashcards_used",
+}
+# Sub-contadores a reiniciar junto al agregado al expirar el periodo.
+_GEN_RESET = {f: 0 for f in _GEN_SUBFIELD.values()}
+
 
 def _ai_limit(plan: Optional[str], kind: str) -> int:
     """Límite por periodo según plan y tipo de cuota (generación/corrección)."""
@@ -687,7 +697,9 @@ def _ai_limit_for_plan(plan: Optional[str]) -> int:
     return _ai_limit(plan, "generation")
 
 
-async def check_and_consume_ai_quota(user: dict, kind: str = "generation", cost: int = 1) -> dict:
+async def check_and_consume_ai_quota(
+    user: dict, kind: str = "generation", cost: int = 1, gen_kind: Optional[str] = None
+) -> dict:
     """Comprueba el plan y la cuota del usuario para `kind` y consume `cost`.
 
     Ciclo unificado: ambos contadores comparten `ai_period_start`. Al expirar el
@@ -696,6 +708,12 @@ async def check_and_consume_ai_quota(user: dict, kind: str = "generation", cost:
     (mensaje diferenciado). Si pasa, incrementa el contador del tipo de forma
     atómica ($inc) y devuelve {used, limit, remaining, period_start, plan, kind}.
 
+    Desglose por tipo: cuando `kind == "generation"`, `gen_kind` es OBLIGATORIO
+    (∈ {questions, summaries, flashcards}). El mismo $inc que sube el agregado
+    sube su sub-contador, así la invariante suma==agregado se mantiene siempre.
+    La validación va ANTES de cualquier $inc: un fallo de programación (gen_kind
+    ausente/erróneo) NO deja cuota consumida a medias.
+
     OBLIGATORIO: invocar antes de CUALQUIER llamada a Gemini.
     """
     uid = user["id"]
@@ -703,28 +721,45 @@ async def check_and_consume_ai_quota(user: dict, kind: str = "generation", cost:
     field = _QUOTA_FIELD[kind]
     limit = _ai_limit(plan, kind)
 
+    # Guardia de invariante: valida el tipo ANTES de tocar la cuota.
+    subfield = None
+    if kind == "generation":
+        if gen_kind not in _GEN_SUBFIELD:
+            raise ValueError(
+                f"gen_kind obligatorio para kind='generation' (∈ {set(_GEN_SUBFIELD)}), recibido: {gen_kind!r}"
+            )
+        subfield = _GEN_SUBFIELD[gen_kind]
+
     now = datetime.now(timezone.utc)
     used = int(user.get(field, 0) or 0)
     period_start = _parse_iso(user.get("ai_period_start"))
 
-    # Reinicio unificado del periodo (o si nunca se inicializó): AMBOS a 0.
+    # Reinicio unificado del periodo (o si nunca se inicializó): AMBOS contadores y
+    # los sub-contadores de desglose a 0, en la misma operación.
     if period_start is None or (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
         used = 0
         period_start = now
         await db.users.update_one(
             {"id": uid},
-            {"$set": {"ai_generations_used": 0, "ai_corrections_used": 0, "ai_period_start": now.isoformat()}},
+            {"$set": {
+                "ai_generations_used": 0, "ai_corrections_used": 0,
+                "ai_period_start": now.isoformat(), **_GEN_RESET,
+            }},
         )
 
     if used + cost > limit:
-        detalle = "correcciones" if kind == "correction" else "generaciones"
+        # Etiqueta de cara al usuario (coherente con la UI "Crear material").
+        detalle = "correcciones" if kind == "correction" else "crear material"
         raise HTTPException(
             status_code=402,
-            detail=f"Has alcanzado el límite de {detalle} de IA de este mes para tu plan",
+            detail=f"Has alcanzado el límite de {detalle} con IA de este mes para tu plan",
         )
 
-    # Consumo atómico del contador del tipo.
-    await db.users.update_one({"id": uid}, {"$inc": {field: cost}})
+    # Consumo atómico: agregado + sub-contador del tipo en un solo $inc.
+    inc = {field: cost}
+    if subfield:
+        inc[subfield] = cost
+    await db.users.update_one({"id": uid}, {"$inc": inc})
     new_used = used + cost
     return {
         "used": new_used,
@@ -736,11 +771,18 @@ async def check_and_consume_ai_quota(user: dict, kind: str = "generation", cost:
     }
 
 
-async def _refund_ai_quota(user: dict, kind: str = "generation", cost: int = 1) -> None:
+async def _refund_ai_quota(
+    user: dict, kind: str = "generation", cost: int = 1, gen_kind: Optional[str] = None
+) -> None:
     """Revierte un consumo previo del contador `kind` (p. ej. si Gemini falló).
-    No debe penalizarse al usuario por un fallo nuestro."""
+    No debe penalizarse al usuario por un fallo nuestro. Para generaciones, pasa el
+    mismo `gen_kind` que en el consumo: decrementa agregado y sub-contador juntos
+    (misma op) para no romper la invariante."""
+    inc = {_QUOTA_FIELD[kind]: -cost}
+    if kind == "generation" and gen_kind in _GEN_SUBFIELD:
+        inc[_GEN_SUBFIELD[gen_kind]] = -cost
     try:
-        await db.users.update_one({"id": user["id"]}, {"$inc": {_QUOTA_FIELD[kind]: -cost}})
+        await db.users.update_one({"id": user["id"]}, {"$inc": inc})
     except Exception as e:  # pragma: no cover - best effort
         logger.error("No se pudo revertir la cuota (%s) del usuario %s: %s", kind, user.get("id"), e)
 
@@ -1383,13 +1425,13 @@ async def regenerate_from_pdf(pdf_id: str, req: RegenerateReq, current_user: dic
 
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
     # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
+    await check_and_consume_ai_quota(current_user, gen_kind="questions")
     try:
         generated = await generate_questions_with_claude(
             topic["name"], pdf["text"], req.num_questions, question_type=req.question_type, num_options=nopts
         )
     except Exception:
-        await _refund_ai_quota(current_user)
+        await _refund_ai_quota(current_user, gen_kind="questions")
         raise
     docs = []
     for g in generated:
@@ -1536,7 +1578,7 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, curr
 
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
     # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
+    await check_and_consume_ai_quota(current_user, gen_kind="questions")
     try:
         generated = await generate_questions_with_claude(
             topic["name"], combined, req.num_questions,
@@ -1544,7 +1586,7 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, curr
             custom_instructions=req.custom_instructions or "",
         )
     except Exception:
-        await _refund_ai_quota(current_user)
+        await _refund_ai_quota(current_user, gen_kind="questions")
         raise
 
     primary_pdf_id = pdfs[0]["id"]
@@ -2396,7 +2438,7 @@ async def generate_topic_flashcards(
 
     # Comprobar plan + cuota ANTES de llamar a Gemini (1 unidad para toda la
     # operación, aunque genere de N PDFs).
-    await check_and_consume_ai_quota(current_user)
+    await check_and_consume_ai_quota(current_user, gen_kind="flashcards")
 
     # Una llamada a Gemini por PDF, en PARALELO (la espera ≈ la más lenta, no la
     # suma). Los PDFs con 0 tarjetas asignadas no se llaman.
@@ -2411,7 +2453,7 @@ async def generate_topic_flashcards(
         # Todo-o-nada: si alguna fuente falla (excepción o [] por error de la
         # IA), no dejamos un estado a medias; revertimos la cuota y abortamos.
         if isinstance(res, Exception) or not res:
-            await _refund_ai_quota(current_user)
+            await _refund_ai_quota(current_user, gen_kind="flashcards")
             raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
         for c in res:
             fc = Flashcard(
@@ -2427,7 +2469,7 @@ async def generate_topic_flashcards(
             docs.append(fc.model_dump())
 
     if not docs:
-        await _refund_ai_quota(current_user)
+        await _refund_ai_quota(current_user, gen_kind="flashcards")
         raise HTTPException(status_code=502, detail="No se pudieron generar flashcards")
 
     # Reemplazo selectivo: solo las tarjetas de los PDFs regenerados. Si se
@@ -2494,6 +2536,12 @@ class User(BaseModel):
     plan: str = "free"
     ai_generations_used: int = 0
     ai_corrections_used: int = 0
+    # Desglose por tipo de "crear material" del ciclo actual. INVARIANTE:
+    # questions + summaries + flashcards == ai_generations_used (se mantiene en el
+    # único punto de consumo/refund/reset). Default 0; lectura tolerante.
+    ai_gen_questions_used: int = 0
+    ai_gen_summaries_used: int = 0
+    ai_gen_flashcards_used: int = 0
     ai_period_start: str = Field(default_factory=_now_iso)  # periodo compartido por ambos contadores
     # Suscripción (Paddle Billing v4)
     subscription_status: str = "free"  # free | active | canceled | past_due | trialing
@@ -2584,12 +2632,15 @@ async def usage_me(current_user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc)
     gen_used = int(current_user.get("ai_generations_used", 0) or 0)
     corr_used = int(current_user.get("ai_corrections_used", 0) or 0)
+    # Desglose por tipo (lectura tolerante: usuarios sin los campos → 0).
+    by_type = {t: int(current_user.get(f, 0) or 0) for t, f in _GEN_SUBFIELD.items()}
     period_start = _parse_iso(current_user.get("ai_period_start")) or now
 
-    # Ciclo unificado: si el periodo ya expiró, mostrar AMBOS como reiniciados.
+    # Ciclo unificado: si el periodo ya expiró, mostrar TODO como reiniciado.
     if (now - period_start) >= timedelta(days=AI_PERIOD_DAYS):
         gen_used = 0
         corr_used = 0
+        by_type = {t: 0 for t in _GEN_SUBFIELD}
         period_start = now
 
     reset_at = period_start + timedelta(days=AI_PERIOD_DAYS)
@@ -2600,11 +2651,15 @@ async def usage_me(current_user: dict = Depends(get_current_user)):
 
     gen_limit = _ai_limit(plan, "generation")
     corr_limit = _ai_limit(plan, "correction")
+    generations = _block(gen_used, gen_limit)
+    # Desglose del agregado "crear material": solo `used` por tipo (el límite es
+    # compartido, no hay límite por tipo). Invariante: suma == generations.used.
+    generations["by_type"] = {t: {"used": u} for t, u in by_type.items()}
     return {
         "plan": plan,
         "period_start": period_start.isoformat(),
         "days_until_reset": days_until_reset,
-        "generations": _block(gen_used, gen_limit),
+        "generations": generations,
         "corrections": _block(corr_used, corr_limit),
         # Retrocompat (= generaciones) para no romper el front durante el deploy.
         "used": gen_used,
@@ -3053,11 +3108,11 @@ async def generate_pdf_summary(pdf_id: str, current_user: dict = Depends(get_cur
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada")
 
     # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user)
+    await check_and_consume_ai_quota(current_user, gen_kind="summaries")
     try:
         content = await _gemini_summary_content(pdf.get("text", ""))
     except Exception as e:
-        await _refund_ai_quota(current_user)
+        await _refund_ai_quota(current_user, gen_kind="summaries")
         logger.error("Summary generation error: %s", e)
         raise HTTPException(status_code=502, detail="Error al generar el resumen")
 

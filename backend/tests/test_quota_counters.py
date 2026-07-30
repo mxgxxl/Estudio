@@ -6,7 +6,7 @@ Verifica:
 - corregir (eval-dev / eval-dev-batch) consume CORRECCIONES, no generaciones,
 - batch: 1 corrección por respuesta evaluada,
 - ciclo unificado: ambos comparten ai_period_start y se reinician juntos,
-- 402 diferenciado ("generaciones" vs "correcciones").
+- 402 diferenciado ("crear material" vs "correcciones").
 
 In-process (TestClient + mongomock, evaluate_dev_answer mockeado).
 """
@@ -73,7 +73,10 @@ def _batch(client, h, items):
 def test_usage_me_returns_both_blocks(client):
     _, h = _auth(client, "qc_usage@x.com")
     u = _usage(client, h)
-    assert u["generations"] == {"used": 0, "limit": 30, "remaining": 30}
+    assert u["generations"] == {
+        "used": 0, "limit": 30, "remaining": 30,
+        "by_type": {"questions": {"used": 0}, "summaries": {"used": 0}, "flashcards": {"used": 0}},
+    }
     assert u["corrections"] == {"used": 0, "limit": 300, "remaining": 300}
     # Retrocompat: los campos planos = generaciones.
     assert u["used"] == 0 and u["limit"] == 30 and u["remaining"] == 30
@@ -143,11 +146,11 @@ def test_402_messages_differ(client, srv):
     try:
         async def _consume_gen():
             user = await srv.db.users.find_one({"id": uid})
-            return await srv.check_and_consume_ai_quota(user, kind="generation")
+            return await srv.check_and_consume_ai_quota(user, kind="generation", gen_kind="questions")
         _run(_consume_gen())  # 1ª ok
         with pytest.raises(HTTPException) as ei:
             _run(_consume_gen())  # 2ª supera el límite
         assert ei.value.status_code == 402
-        assert "generaciones" in ei.value.detail.lower()
+        assert "crear material" in ei.value.detail.lower()
     finally:
         srv.FREE_AI_GENERATIONS_PER_MONTH = orig_g
