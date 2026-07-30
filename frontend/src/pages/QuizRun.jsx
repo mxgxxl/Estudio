@@ -426,9 +426,25 @@ export default function QuizRun() {
     };
 
     const answeredCount = answers.filter((a) => a !== -1).length;
+    const blankCount = quiz.questions.length - answeredCount;
     // En examen se navega libre (dev incluido: se corrige al final). En práctica
     // hay que revelar/responder para avanzar.
     const canGoNext = isExam ? true : revealed;
+
+    // Envío desde el botón "Finalizar": en examen, si quedan preguntas en blanco,
+    // confirmar antes. El auto-envío por tiempo agotado NO pasa por aquí (envía
+    // sin preguntar). Práctica no llega aquí (feedback inmediato, sin envío).
+    const confirmAndSubmit = () => {
+        if (
+            isExam && blankCount > 0 &&
+            !window.confirm(
+                `Te quedan ${blankCount} pregunta${blankCount === 1 ? "" : "s"} sin responder. ¿Enviar de todas formas?`
+            )
+        ) {
+            return;
+        }
+        handleSubmit();
+    };
 
     return (
         <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
@@ -489,9 +505,20 @@ export default function QuizRun() {
 
                     {/* Cabecera pregunta */}
                     <div className="flex items-center justify-between mb-3">
-                        <span className="label-eyebrow">
-                            {q.topic_name} · {isDevQ ? "Desarrollo" : isTF ? "Verdadero/Falso" : "Opción múltiple"}
-                        </span>
+                        <div className="flex items-center gap-2 min-w-0">
+                            <span className="label-eyebrow truncate">
+                                {q.topic_name} · {isDevQ ? "Desarrollo" : isTF ? "Verdadero/Falso" : "Opción múltiple"}
+                            </span>
+                            {isExam && answers[idx] === -1 && (
+                                <span
+                                    data-testid="blank-indicator"
+                                    className="shrink-0 flex items-center gap-1 text-[0.65rem] font-medium px-1.5 py-0.5 rounded"
+                                    style={{ background: "var(--bg-secondary)", color: "var(--text-muted)" }}
+                                >
+                                    <MinusCircle className="w-3 h-3" /> Sin responder
+                                </span>
+                            )}
+                        </div>
                         <div className="flex gap-1">
                             <button
                                 onClick={() => setEditOpen(true)}
@@ -557,9 +584,9 @@ export default function QuizRun() {
                                     );
                                 })}
                             </div>
-                            {isExam && selected !== -1 && quiz.penalty_factor && (
+                            {isExam && (
                                 <button onClick={onClearAnswer} data-testid="clear-answer-btn" className="text-xs flex items-center gap-1 mb-4 hover:underline" style={{ color: "var(--text-muted)" }}>
-                                    <MinusCircle className="w-3 h-3" /> Dejar en blanco (no penaliza)
+                                    <MinusCircle className="w-3 h-3" /> Dejar en blanco{quiz.penalty_factor ? " (no penaliza)" : ""}
                                 </button>
                             )}
                             {revealed && q.explanation && (
@@ -579,11 +606,11 @@ export default function QuizRun() {
                             Anterior
                         </button>
                         <span className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>
-                            {answeredCount} respondidas
+                            {answeredCount} respondidas{isExam && blankCount > 0 ? ` · ${blankCount} en blanco` : ""}
                         </span>
                         {isExam ? (
                             idx + 1 === quiz.questions.length ? (
-                                <button onClick={handleSubmit} disabled={submitting} data-testid="submit-exam-btn" className="btn-primary flex items-center gap-2 text-sm disabled:opacity-60">
+                                <button onClick={confirmAndSubmit} disabled={submitting} data-testid="submit-exam-btn" className="btn-primary flex items-center gap-2 text-sm disabled:opacity-60">
                                     {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
                                     {submitting ? "Corrigiendo…" : "Finalizar"}
                                 </button>
