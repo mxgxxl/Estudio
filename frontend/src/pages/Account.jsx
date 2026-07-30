@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Sparkles, Loader2, CheckCircle2, CreditCard, Settings, AlertTriangle } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Sparkles, Loader2, CheckCircle2, CreditCard, Settings, AlertTriangle, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { billingStatus, billingPortal } from "@/lib/api";
 import { startPremiumCheckout } from "@/lib/paddle";
@@ -21,7 +22,7 @@ function formatDate(iso) {
 }
 
 export default function Account() {
-    const { user, usage } = useAuth();
+    const { user } = useAuth();
     const [status, setStatus] = useState(null);
     const [loading, setLoading] = useState(true);
     const [checkingOut, setCheckingOut] = useState(false);
@@ -137,30 +138,20 @@ export default function Account() {
                                 <dd className="font-medium">{periodEnd}</dd>
                             </div>
                         )}
-                        {usage && (
-                            <>
-                                <div className="flex justify-between">
-                                    <dt style={{ color: "var(--text-muted)" }}>Generaciones de IA este mes</dt>
-                                    <dd className="font-medium">
-                                        {(usage.generations?.used ?? usage.used)} / {(usage.generations?.limit ?? usage.limit)}
-                                    </dd>
-                                </div>
-                                <div className="flex justify-between">
-                                    <dt style={{ color: "var(--text-muted)" }}>Correcciones de IA este mes</dt>
-                                    <dd className="font-medium">
-                                        {(usage.corrections?.used ?? 0)} / {(usage.corrections?.limit ?? 0)}
-                                    </dd>
-                                </div>
-                                {usage.days_until_reset != null && (
-                                    <div className="flex justify-between">
-                                        <dt style={{ color: "var(--text-muted)" }}>Se renueva en</dt>
-                                        <dd className="font-medium">
-                                            {usage.days_until_reset} día{usage.days_until_reset === 1 ? "" : "s"}
-                                        </dd>
-                                    </div>
-                                )}
-                            </>
-                        )}
+                        {/* El detalle de cuota vive en /uso (única fuente); aquí solo el enlace. */}
+                        <div className="flex justify-between items-center">
+                            <dt style={{ color: "var(--text-muted)" }}>Uso de IA este mes</dt>
+                            <dd>
+                                <Link
+                                    to="/uso"
+                                    data-testid="account-usage-link"
+                                    className="font-medium inline-flex items-center gap-1 hover:underline"
+                                    style={{ color: "var(--brand)" }}
+                                >
+                                    Ver detalle <ArrowRight className="w-3.5 h-3.5" />
+                                </Link>
+                            </dd>
+                        </div>
                     </dl>
                 )}
 
@@ -198,7 +189,7 @@ export default function Account() {
                                 style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
                             >
                                 <CheckCircle2 className="w-4 h-4" style={{ color: "var(--sage)" }} />
-                                Tienes acceso completo a las generaciones de IA del plan Premium.
+                                Tienes acceso completo a la creación de material con IA del plan Premium.
                             </div>
                         )}
                         <button

@@ -61,7 +61,7 @@ export default function PremiumDialog({ open, onClose, detail }) {
                 </h2>
                 <p className="text-sm mb-6" style={{ color: "var(--text-secondary)" }}>
                     {detail ||
-                        "Has agotado tus generaciones de IA de este mes. Pásate a Premium para seguir generando preguntas, flashcards y resúmenes."}
+                        "Has agotado tu cuota de crear material de este mes. Pásate a Premium para seguir generando preguntas, flashcards y resúmenes."}
                 </p>
 
                 <div className="flex items-center justify-end gap-2">

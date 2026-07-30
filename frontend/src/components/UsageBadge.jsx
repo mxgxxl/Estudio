@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { Sparkles, CheckSquare } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
@@ -22,12 +23,14 @@ export default function UsageBadge() {
     const days = usage.days_until_reset;
 
     const title =
-        `Plan ${plan} · ${gen.used}/${gen.limit} generaciones · ${corr.used}/${corr.limit} correcciones` +
-        (days != null ? ` · se renueva en ${days} día${days === 1 ? "" : "s"}` : "");
+        `Plan ${plan} · ${gen.used}/${gen.limit} crear material · ${corr.used}/${corr.limit} correcciones` +
+        (days != null ? ` · se renueva en ${days} día${days === 1 ? "" : "s"}` : "") +
+        " · ver detalle";
 
     return (
-        <div
-            className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium"
+        <Link
+            to="/uso"
+            className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium hover:opacity-80"
             style={{ background: "var(--bg-secondary)" }}
             title={title}
             data-testid="usage-badge"
@@ -41,6 +44,6 @@ export default function UsageBadge() {
                 <CheckSquare className="w-3.5 h-3.5" />
                 {corr.used}/{corr.limit}
             </span>
-        </div>
+        </Link>
     );
 }

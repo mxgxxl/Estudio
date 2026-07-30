@@ -12,6 +12,7 @@ import Stats from "@/pages/Stats";
 import FlashcardMode from "@/pages/FlashcardMode";
 import SurvivalMode from "@/pages/SurvivalMode";
 import Account from "@/pages/Account";
+import Uso from "@/pages/Uso";
 import Biblioteca from "@/pages/Biblioteca";
 import Library from "@/pages/Library";
 import QuestionBank from "@/pages/QuestionBank";
@@ -52,6 +53,7 @@ function App() {
                                 <Route path="/temas/:id/flashcards" element={<FlashcardMode />} />
                                 <Route path="/supervivencia" element={<SurvivalMode />} />
                                 <Route path="/cuenta" element={<Account />} />
+                                <Route path="/uso" element={<Uso />} />
                             </Route>
                         </Route>
                     </Routes>
