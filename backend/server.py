@@ -2147,13 +2147,11 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         qtype = a.get("question_type", "mcq")
 
         if selected == -1 and qtype != "dev":
-            # Con el toggle activo el blanco cuenta como fallo (entra en `wrong` y
-            # penaliza); si no, es neutro (unanswered). En ambos casos NO toca las
-            # stats por pregunta (un blanco no es un intento real de esa pregunta).
-            if blanks_as_wrong:
-                wrong += 1
-            else:
-                unanswered += 1
+            # El blanco SIEMPRE se cuenta como blanco (unanswered), aunque penalice:
+            # así Resultados puede mostrarlo aparte de los fallos reales. Su
+            # penalización (si el toggle está activo) se aplica en `raw`, más abajo.
+            # No toca las stats por pregunta (un blanco no es un intento real).
+            unanswered += 1
             continue
 
         if qtype == "dev":
@@ -2183,8 +2181,11 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         }
         await db.questions.update_one({"id": qid, "user_id": uid}, update)
 
+    # Los blancos penalizan como un fallo si el toggle está activo, pero se cuentan
+    # aparte (unanswered); aquí entran en el cómputo de la nota junto a los fallos.
+    penalized = wrong + (unanswered if blanks_as_wrong else 0)
     if pf and pf > 0:
-        raw = correct - (wrong / pf)
+        raw = correct - (penalized / pf)
     else:
         raw = float(correct)
     if raw < 0:
@@ -2223,6 +2224,8 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         "raw_score": raw_score,
         "score_10": score_10,
         "penalty_factor": pf,
+        # Efectivo (blindado): si los blancos han penalizado como fallo en esta nota.
+        "blanks_penalized": blanks_as_wrong,
     }
 
 

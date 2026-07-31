@@ -65,6 +65,7 @@ def test_blank_is_neutral_not_wrong(client):
     assert b["wrong"] == 1          # la blanca NO cuenta como fallo
     assert b["unanswered"] == 1
     assert b["total"] == 4
+    assert b["blanks_penalized"] is False
     assert b["raw_score"] == 1.0    # 2 - (1/1); si la blanca penalizara sería 0
     assert b["score_10"] == 2.5
 
@@ -96,29 +97,31 @@ def test_all_blank_submits_cleanly(client):
 
 # --- toggle "blancos restan" (Fase 4) --------------------------------------
 def test_blanks_count_as_wrong_penalizes(client):
-    """Toggle activo + penalización 1: el blanco entra en `wrong` y penaliza igual
-    que un fallo. 2 ok, 1 fallo, 1 blanco → wrong=2, unanswered=0;
-    raw = 2 - 2/1 = 0; nota 0."""
+    """Toggle activo + penalización 1: el blanco PENALIZA como un fallo, pero se
+    CUENTA aparte (wrong = solo fallos reales, unanswered = blancos reales).
+    2 ok, 1 fallo, 1 blanco → wrong=1, unanswered=1, blanks_penalized=True;
+    raw = 2 - (1+1)/1 = 0; nota 0."""
     h = _auth(client, "blank_wrong@x.com")
     answers = [_ans("q1", 0), _ans("q2", 0), _ans("q3", 1), _ans("q4", -1)]
     r = _submit(client, h, answers, penalty_factor=1, blanks_count_as_wrong=True)
     assert r.status_code == 200, r.text
     b = r.json()
     assert b["correct"] == 2
-    assert b["wrong"] == 2          # el blanco cuenta como fallo
-    assert b["unanswered"] == 0     # ya no es neutro
-    assert b["raw_score"] == 0.0    # 2 - 2/1
+    assert b["wrong"] == 1          # solo el fallo real
+    assert b["unanswered"] == 1     # el blanco se cuenta como blanco
+    assert b["blanks_penalized"] is True
+    assert b["raw_score"] == 0.0    # 2 - (1 fallo + 1 blanco)/1
     assert b["score_10"] == 0.0
 
 
 def test_blanks_count_as_wrong_ratio_2(client):
-    """Mismo caso con ratio 2: raw = 2 - 2/2 = 1; nota (1/4)*10 = 2.5.
-    Contrasta con el neutro (test_blank_is_neutral_not_wrong daba raw 1 con 1 fallo)."""
+    """Mismo caso con ratio 2: raw = 2 - (1+1)/2 = 1; nota (1/4)*10 = 2.5. La nota
+    penaliza fallo + blanco, pero los conteos van separados."""
     h = _auth(client, "blank_wrong2@x.com")
     answers = [_ans("q1", 0), _ans("q2", 0), _ans("q3", 1), _ans("q4", -1)]
     r = _submit(client, h, answers, penalty_factor=2, blanks_count_as_wrong=True)
     b = r.json()
-    assert b["wrong"] == 2 and b["unanswered"] == 0
+    assert b["wrong"] == 1 and b["unanswered"] == 1 and b["blanks_penalized"] is True
     assert b["raw_score"] == 1.0 and b["score_10"] == 2.5
 
 
@@ -131,6 +134,7 @@ def test_toggle_ignored_without_penalty(client):
     assert r.status_code == 200, r.text
     b = r.json()
     assert b["correct"] == 1 and b["wrong"] == 0 and b["unanswered"] == 2
+    assert b["blanks_penalized"] is False   # blindado: sin penalización no penaliza
     assert b["raw_score"] == 1.0 and b["score_10"] == round((1 / 3) * 10, 2)
 
 
