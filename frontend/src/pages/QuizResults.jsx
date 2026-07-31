@@ -112,6 +112,7 @@ export default function QuizResults() {
         answers,
         devScores = {},
         devResults = {},
+        blanks_count_as_wrong = false,
     } = data;
 
     const pct = total ? Math.round((correct / total) * 100) : 0;
@@ -273,7 +274,9 @@ export default function QuizResults() {
                     const isDevQ = q.question_type === "dev";
                     const devScore = devScores[q.id];
                     const devResult = devResults[q.id];
-                    const isUnanswered = !isDevQ && sel === -1;
+                    // Con "blancos restan" el blanco se pinta como error (no como
+                    // "sin responder"), coherente con que penalizó como un fallo.
+                    const isUnanswered = !isDevQ && sel === -1 && !blanks_count_as_wrong;
                     const ok = isDevQ
                         ? (devScore ?? 0) >= 5
                         : sel === q.correct_index && !isUnanswered;
@@ -301,6 +304,9 @@ export default function QuizResults() {
                                     <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
                                         {q.topic_name} · Pregunta {i + 1} ·{" "}
                                         {isDevQ ? "Desarrollo" : q.question_type === "tf" ? "V/F" : "Test"}
+                                        {!isDevQ && sel === -1 && blanks_count_as_wrong && (
+                                            <span style={{ color: "var(--error)" }}> · En blanco (penaliza)</span>
+                                        )}
                                     </div>
                                     <div className="font-display font-bold text-base md:text-lg leading-snug mb-3">
                                         {q.question}

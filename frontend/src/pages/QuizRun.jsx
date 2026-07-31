@@ -318,6 +318,7 @@ export default function QuizRun() {
                 duration_seconds: Math.floor((Date.now() - startedRef.current) / 1000),
                 time_limit_seconds: quiz.time_limit_seconds || null,
                 penalty_factor: quiz.penalty_factor || null,
+                blanks_count_as_wrong: !!quiz.blanks_count_as_wrong,
                 question_type: quiz.question_type || null,
             };
             const res = await quizSubmit(payload);
@@ -329,6 +330,7 @@ export default function QuizRun() {
                 devResults,  // feedback por pregunta (lo consumirá la pantalla de resultados en D)
                 selection,
                 behavior,
+                blanks_count_as_wrong: !!quiz.blanks_count_as_wrong,
             }));
             navigate("/quiz/results");
         } catch {

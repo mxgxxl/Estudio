@@ -230,12 +230,21 @@ export default function QuizSetup() {
     const [numQuestions, setNumQuestions] = useState(15);
     const [timeLimit, setTimeLimit] = useState(15);
     const [penalty, setPenalty] = useState(0);
+    // Examen: los blancos también restan (como un fallo). Subordinado a la
+    // penalización y solo en Examen; se reinicia si deja de aplicar.
+    const [blanksCountAsWrong, setBlanksCountAsWrong] = useState(false);
     const [starting, setStarting] = useState(false);
     const [useDistribution, setUseDistribution] = useState(false);
     const [topicQuestions, setTopicQuestions] = useState({}); // { topicId: numQuestions }
     // Disponibilidad de la SELECCIÓN activa (solo cuando ≠ "all"): del backend.
     const [selectionCount, setSelectionCount] = useState(null);
     const [countLoading, setCountLoading] = useState(false);
+
+    // El toggle de "blancos restan" solo aplica en Examen con penalización: si deja
+    // de cumplirse, lo desmarcamos para no arrastrar un valor obsoleto.
+    useEffect(() => {
+        if (behavior !== "exam" || penalty === 0) setBlanksCountAsWrong(false);
+    }, [behavior, penalty]);
 
     useEffect(() => {
         listSubjects()
@@ -385,6 +394,8 @@ export default function QuizSetup() {
                 topic_ids: Array.from(selectedTopics),
                 time_limit_seconds: behavior === "exam" ? timeLimit * 60 : null,
                 penalty_factor: penalty > 0 ? penalty : null,
+                // Valor efectivo (solo Examen + penalización); downstream lo usa tal cual.
+                blanks_count_as_wrong: behavior === "exam" && penalty > 0 && blanksCountAsWrong,
                 question_type: questionType,
                 started_at: Date.now(),
             }));
@@ -533,11 +544,28 @@ export default function QuizSetup() {
                         </button>
                     ))}
                 </div>
+                {penalty > 0 && behavior === "exam" && (
+                    <label
+                        data-testid="blanks-count-as-wrong"
+                        className="mt-2 flex items-center gap-2 text-sm p-2 rounded-md cursor-pointer"
+                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={blanksCountAsWrong}
+                            onChange={(e) => setBlanksCountAsWrong(e.target.checked)}
+                            className="accent-[color:var(--brand)]"
+                        />
+                        Las preguntas en blanco también restan (cuentan como un fallo)
+                    </label>
+                )}
                 {penalty > 0 && (
                     <div className="mt-2 text-xs flex items-start gap-2 p-2 rounded-md"
                         style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
                         <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
-                        Las preguntas en blanco no penalizan. Solo restan las falladas.
+                        {blanksCountAsWrong && behavior === "exam"
+                            ? "Los blancos restan como un fallo (−1 cada N según el ratio); solo suman las acertadas."
+                            : "Las preguntas en blanco no penalizan. Solo restan las falladas."}
                     </div>
                 )}
             </div>
