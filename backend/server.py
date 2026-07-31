@@ -1898,44 +1898,18 @@ async def eval_dev_batch(req: EvalDevBatchReq, current_user: dict = Depends(get_
 
 
 # ---- Quiz ----
-# Dos ejes del estudio (Fase 1): SELECCIÓN (qué preguntas) × COMPORTAMIENTO (cómo
-# se juega). El backend solo usa `selection` para elegir preguntas; `behavior` se
-# persiste. El viejo `mode` (un único string que conflaciaba ambos) se acepta por
-# compat durante el despliegue y se deriva/escribe como puente hasta la Fase 2.
+# Dos ejes del estudio: SELECCIÓN (qué preguntas) × COMPORTAMIENTO (cómo se juega),
+# fuente única. El backend solo usa `selection` para elegir preguntas; `behavior`
+# se persiste. (El viejo `mode` que conflaciaba ambos quedó retirado por completo.)
 _QUIZ_SELECTIONS = ("all", "errors", "srs", "favorites")
 _QUIZ_BEHAVIORS = ("practice", "exam")
-_MODE_TO_AXES = {
-    "exam": ("all", "exam"),
-    "practice": ("all", "practice"),
-    "errors": ("errors", "practice"),
-    "srs": ("srs", "practice"),
-    "favorites": ("favorites", "practice"),
-}
 
 
-def _resolve_quiz_axes(mode: Optional[str], selection: Optional[str], behavior: Optional[str]):
-    """Resuelve (selection, behavior) aceptando los ejes nuevos O el `mode` viejo.
-    Prioriza los ejes nuevos; cae al mapeo de compat si solo llega `mode`."""
-    if selection in _QUIZ_SELECTIONS:
-        beh = behavior if behavior in _QUIZ_BEHAVIORS else "practice"
-        return selection, beh
-    if mode in _MODE_TO_AXES:
-        return _MODE_TO_AXES[mode]
-    return ("all", "practice")
-
-
-def _derive_mode(selection: str, behavior: str) -> str:
-    """Deriva el `mode` viejo desde los dos ejes (puente hasta Fase 2, para no
-    romper el label de "intentos recientes" en stats, que lee attempt.mode).
-
-    LOSSY a propósito: es un único campo para dos ejes, así que combinaciones
-    nuevas como behavior=exam+selection=errors se colapsan a "exam" (se pierde
-    "errors"). Aceptable como puente: esas combinaciones no existen hasta la Fase 3
-    y `mode` se retira en la Fase 2 (stats pasará a leer selection/behavior), antes
-    de que puedan crearse."""
-    if behavior == "exam":
-        return "exam"
-    return "practice" if selection == "all" else selection
+def _resolve_quiz_axes(selection: Optional[str], behavior: Optional[str]):
+    """Normaliza (selection, behavior) con defaults tolerantes (all/practice)."""
+    sel = selection if selection in _QUIZ_SELECTIONS else "all"
+    beh = behavior if behavior in _QUIZ_BEHAVIORS else "practice"
+    return sel, beh
 
 
 def _quiz_pool_query(
@@ -1972,9 +1946,7 @@ def _quiz_pool_query(
 
 
 class QuizStartReq(BaseModel):
-    # `mode` viejo (compat, opcional) + ejes nuevos. Al menos uno debe permitir
-    # resolver la selección; si no llega ninguno se asume ("all","practice").
-    mode: Optional[Literal["exam", "practice", "errors", "srs", "favorites"]] = None
+    # Ejes del estudio (si faltan, defaults all/practice en _resolve_quiz_axes).
     selection: Optional[Literal["all", "errors", "srs", "favorites"]] = None
     behavior: Optional[Literal["practice", "exam"]] = None
     subject_ids: List[str] = []
@@ -1990,7 +1962,7 @@ class QuizStartReq(BaseModel):
 
 @api.post("/quiz/start")
 async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
-    selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
+    selection, behavior = _resolve_quiz_axes(req.selection, req.behavior)
     query = _quiz_pool_query(
         current_user["id"], selection=selection,
         subject_ids=req.subject_ids, topic_ids=req.topic_ids,
@@ -2062,13 +2034,10 @@ async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current
                 "favorite": q.get("favorite", False),
                 "difficult": q.get("difficult", False),
             })
-    # Aditivo: ejes nuevos + `mode` derivado (compat con el frontend viejo, que
-    # solo lee `data.questions`).
     return {
         "questions": payload,
         "selection": selection,
         "behavior": behavior,
-        "mode": _derive_mode(selection, behavior),
     }
 
 
@@ -2094,8 +2063,7 @@ async def quiz_available(
 
 
 class QuizSubmitReq(BaseModel):
-    # `mode` viejo (compat) + ejes nuevos; se resuelven con _resolve_quiz_axes.
-    mode: Optional[Literal["exam", "practice", "errors", "srs", "favorites"]] = None
+    # Ejes del estudio (defaults all/practice en _resolve_quiz_axes si faltan).
     selection: Optional[Literal["all", "errors", "srs", "favorites"]] = None
     behavior: Optional[Literal["practice", "exam"]] = None
     subject_ids: List[str] = []
@@ -2131,7 +2099,7 @@ def _update_srs(q: dict, correct: bool) -> dict:
 @api.post("/quiz/submit")
 async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
-    selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
+    selection, behavior = _resolve_quiz_axes(req.selection, req.behavior)
     pf = req.penalty_factor
     # El blanco solo puede "restar" si hay penalización activa (blindaje backend:
     # la UI ya subordina el toggle a la penalización, pero no confiamos en ella).

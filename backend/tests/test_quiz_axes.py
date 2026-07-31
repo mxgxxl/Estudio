@@ -1,12 +1,13 @@
 """
-Fase 1: dos ejes de estudio en el backend — SELECCIÓN (all|errors|srs|favorites)
-× COMPORTAMIENTO (practice|exam).
+Dos ejes de estudio en el backend — SELECCIÓN (all|errors|srs|favorites) ×
+COMPORTAMIENTO (practice|exam). El viejo `mode` quedó retirado del todo (Paso B):
+ni se acepta en request, ni se deriva, ni se emite en la respuesta.
 
 Cubre:
 - quiz_start selecciona el pool por `selection` (cada valor).
-- Compat: el `mode` viejo se mapea a (selection, behavior) y da el MISMO pool.
-- quiz_submit persiste selection/behavior en Attempt (el `mode` ya NO se persiste,
-  Fase 2), tanto con ejes nuevos como con el `mode` viejo del request (compat).
+- La respuesta trae los ejes y NO `mode`; sin ejes, defaults (all/practice).
+- quiz_submit persiste selection/behavior en Attempt (nunca `mode`).
+- GET /quiz/available cuenta por selección (gating).
 - SRS SOLO avanza en selection=="srs":
   * en srs avanza,
   * fuera de srs no se toca,
@@ -110,7 +111,7 @@ def test_start_response_has_axes(client, srv):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["selection"] == "all" and body["behavior"] == "exam"
-    assert body["mode"] == "exam"  # derivado
+    assert "mode" not in body  # `mode` retirado de la respuesta (Paso B)
 
 
 # --- GET /quiz/available (gating por selección) ----------------------------
@@ -148,42 +149,26 @@ def test_quiz_available_zero_for_empty_selection(client, srv):
     assert count(selection="favorites") == 0
 
 
-# --- compat del `mode` viejo ----------------------------------------------
-def test_old_mode_maps_to_same_pool(client, srv):
-    h, uid = _auth(client, "compat@x.com")
-    _insert_q(srv, uid, "c_u")
-    _insert_q(srv, uid, "c_err", times_answered=3, times_correct=1)
-    _insert_q(srv, uid, "c_fav", favorite=True)
-
-    def ids(**body):
-        r = _start(client, h, **body)
-        assert r.status_code == 200, r.text
-        return {q["id"] for q in r.json()["questions"]}
-
-    # mode viejo == su equivalente por ejes
-    assert ids(mode="errors") == ids(selection="errors") == {"c_err"}
-    assert ids(mode="favorites") == ids(selection="favorites") == {"c_fav"}
-    assert ids(mode="practice") == ids(selection="all")
-    assert ids(mode="exam") == ids(selection="all")
-
-
-# --- Attempt persiste los dos ejes (mode ya NO se persiste, Fase 2) --------
-def test_attempt_persists_axes_new_and_old(client, srv):
+# --- Attempt persiste los dos ejes (mode retirado del todo) ----------------
+def test_attempt_persists_axes(client, srv):
     h, uid = _auth(client, "att@x.com")
     _insert_q(srv, uid, "a1")
 
-    # Ejes nuevos: errores jugado como examen.
+    # Errores jugado como examen: se persisten ambos ejes, nunca `mode`.
     r = _submit(client, h, [_ans("a1")], selection="errors", behavior="exam", penalty_factor=1)
     assert r.status_code == 200, r.text
     at = _attempt(srv, r.json()["attempt_id"])
     assert at["selection"] == "errors" and at["behavior"] == "exam"
-    assert "mode" not in at   # `mode` retirado de la persistencia
+    assert "mode" not in at
 
-    # Compat de ENTRADA: el `mode` viejo del request se mapea a los ejes...
-    r = _submit(client, h, [_ans("a1")], mode="errors")
+
+def test_axes_default_when_absent(client, srv):
+    """Sin ejes en el request → defaults tolerantes (all/practice)."""
+    h, uid = _auth(client, "defaults@x.com")
+    _insert_q(srv, uid, "d1")
+    r = _submit(client, h, [_ans("d1")])
     at = _attempt(srv, r.json()["attempt_id"])
-    assert at["selection"] == "errors" and at["behavior"] == "practice"
-    assert "mode" not in at   # ...pero NO se persiste como campo
+    assert at["selection"] == "all" and at["behavior"] == "practice"
 
 
 # --- SRS solo en selection=="srs" -----------------------------------------
@@ -219,14 +204,3 @@ def test_existing_srs_state_untouched_in_exam(client, srv):
     assert after["last_correct"] is True
 
 
-def test_existing_srs_state_untouched_with_old_mode_exam(client, srv):
-    """Igual pero por la vía de compat (mode='exam' viejo) → mapea a selection all."""
-    h, uid = _auth(client, "srs_keep_old@x.com")
-    _insert_q(srv, uid, "skeep2", srs_next_review="2031-03-03T00:00:00+00:00",
-              srs_ease=2.7, srs_interval_days=12.0)
-    before = _get_q(srv, "skeep2")
-    r = _submit(client, h, [_ans("skeep2")], mode="exam")
-    assert r.status_code == 200, r.text
-    after = _get_q(srv, "skeep2")
-    assert (after["srs_next_review"], after["srs_ease"], after["srs_interval_days"]) == \
-           (before["srs_next_review"], before["srs_ease"], before["srs_interval_days"])

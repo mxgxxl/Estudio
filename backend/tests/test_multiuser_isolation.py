@@ -166,7 +166,7 @@ class TestAccessPolicy:
         assert client.get("/api/subjects").status_code == 401
 
     def test_quiz_requires_auth(self, client):
-        assert client.post("/api/quiz/start", json={"mode": "practice"}).status_code == 401
+        assert client.post("/api/quiz/start", json={"selection": "all", "behavior": "practice"}).status_code == 401
 
 
 # --------------------------------------------------------------------------
@@ -239,7 +239,7 @@ class TestCrossUserById:
 class TestQuizIsolation:
     def test_quiz_start_only_own(self, client, world):
         r = client.post("/api/quiz/start",
-                        json={"mode": "practice", "num_questions": 50},
+                        json={"selection": "all", "behavior": "practice", "num_questions": 50},
                         headers=world["ha"])
         assert r.status_code == 200
         started_ids = {q["id"] for q in r.json()["questions"]}
@@ -250,7 +250,7 @@ class TestQuizIsolation:
 
     def test_quiz_submit_records_for_user(self, client, world):
         start = client.post("/api/quiz/start",
-                            json={"mode": "practice", "num_questions": 50},
+                            json={"selection": "all", "behavior": "practice", "num_questions": 50},
                             headers=world["ha"]).json()
         answers = [{
             "question_id": q["id"],
@@ -259,7 +259,7 @@ class TestQuizIsolation:
             "question_type": "mcq",
         } for q in start["questions"]]
         r = client.post("/api/quiz/submit",
-                        json={"mode": "practice", "answers": answers, "duration_seconds": 10},
+                        json={"selection": "all", "behavior": "practice", "answers": answers, "duration_seconds": 10},
                         headers=world["ha"])
         assert r.status_code == 200
         assert r.json()["total"] == len(answers)

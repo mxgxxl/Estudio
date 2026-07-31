@@ -190,7 +190,7 @@ def test_isolation(client, dataset):
 def test_quiz_start_with_question_ids(client, dataset):
     h = dataset["h"]
     r = client.post("/api/quiz/start", json={
-        "mode": "practice", "question_ids": ["q1", "q3"], "num_questions": 20,
+        "behavior": "practice", "question_ids": ["q1", "q3"], "num_questions": 20,
     }, headers=h)
     assert r.status_code == 200, r.text
     got = {q["id"] for q in r.json()["questions"]}
@@ -201,7 +201,7 @@ def test_quiz_start_question_ids_are_user_scoped(client, dataset):
     """Los ids de otro usuario no se cuelan aunque se pasen explícitamente."""
     h = dataset["h"]
     r = client.post("/api/quiz/start", json={
-        "mode": "practice", "question_ids": ["q1", "qX"],
+        "behavior": "practice", "question_ids": ["q1", "qX"],
     }, headers=h)
     assert r.status_code == 200, r.text
     got = {q["id"] for q in r.json()["questions"]}
@@ -211,7 +211,7 @@ def test_quiz_start_question_ids_are_user_scoped(client, dataset):
 def test_quiz_start_respects_num_questions(client, dataset):
     h = dataset["h"]
     r = client.post("/api/quiz/start", json={
-        "mode": "practice", "question_ids": ["q1", "q2", "q3", "q4"], "num_questions": 2,
+        "behavior": "practice", "question_ids": ["q1", "q2", "q3", "q4"], "num_questions": 2,
     }, headers=h)
     assert r.status_code == 200, r.text
     assert len(r.json()["questions"]) == 2
