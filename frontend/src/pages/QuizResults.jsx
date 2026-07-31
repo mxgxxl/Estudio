@@ -113,7 +113,10 @@ export default function QuizResults() {
         devScores = {},
         devResults = {},
         blanks_count_as_wrong = false,
+        blanks_penalized,
     } = data;
+    // Autoritativo del backend; fallback al flag del cliente durante el despliegue.
+    const blanksPenalized = blanks_penalized ?? blanks_count_as_wrong;
 
     const pct = total ? Math.round((correct / total) * 100) : 0;
     const passed = score_10 >= 5;
@@ -208,9 +211,12 @@ export default function QuizResults() {
                             <div className="text-xs" style={{ color: "var(--text-muted)" }}>Fallos</div>
                         </div>
                         <div>
-                            <MinusCircle className="w-4 h-4 mx-auto" style={{ color: "var(--text-muted)" }} />
+                            <MinusCircle className="w-4 h-4 mx-auto" style={{ color: blanksPenalized && unanswered > 0 ? "var(--error)" : "var(--text-muted)" }} />
                             <div className="font-display text-2xl font-bold mt-1">{unanswered}</div>
                             <div className="text-xs" style={{ color: "var(--text-muted)" }}>Blanco</div>
+                            {blanksPenalized && unanswered > 0 && (
+                                <div className="text-[10px] font-medium" style={{ color: "var(--error)" }}>penalizan</div>
+                            )}
                         </div>
                     </div>
                     <div className="progress-track mt-3">
@@ -276,7 +282,7 @@ export default function QuizResults() {
                     const devResult = devResults[q.id];
                     // Con "blancos restan" el blanco se pinta como error (no como
                     // "sin responder"), coherente con que penalizó como un fallo.
-                    const isUnanswered = !isDevQ && sel === -1 && !blanks_count_as_wrong;
+                    const isUnanswered = !isDevQ && sel === -1 && !blanksPenalized;
                     const ok = isDevQ
                         ? (devScore ?? 0) >= 5
                         : sel === q.correct_index && !isUnanswered;
@@ -304,7 +310,7 @@ export default function QuizResults() {
                                     <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
                                         {q.topic_name} · Pregunta {i + 1} ·{" "}
                                         {isDevQ ? "Desarrollo" : q.question_type === "tf" ? "V/F" : "Test"}
-                                        {!isDevQ && sel === -1 && blanks_count_as_wrong && (
+                                        {!isDevQ && sel === -1 && blanksPenalized && (
                                             <span style={{ color: "var(--error)" }}> · En blanco (penaliza)</span>
                                         )}
                                     </div>

@@ -440,7 +440,9 @@ export default function QuizRun() {
         if (
             isExam && blankCount > 0 &&
             !window.confirm(
-                `Te quedan ${blankCount} pregunta${blankCount === 1 ? "" : "s"} sin responder. ¿Enviar de todas formas?`
+                `Te quedan ${blankCount} pregunta${blankCount === 1 ? "" : "s"} sin responder` +
+                (quiz.blanks_count_as_wrong ? ", y penalizan como un fallo" : "") +
+                ". ¿Enviar de todas formas?"
             )
         ) {
             return;
@@ -588,7 +590,7 @@ export default function QuizRun() {
                             </div>
                             {isExam && (
                                 <button onClick={onClearAnswer} data-testid="clear-answer-btn" className="text-xs flex items-center gap-1 mb-4 hover:underline" style={{ color: "var(--text-muted)" }}>
-                                    <MinusCircle className="w-3 h-3" /> Dejar en blanco{quiz.penalty_factor ? " (no penaliza)" : ""}
+                                    <MinusCircle className="w-3 h-3" /> Dejar en blanco{quiz.blanks_count_as_wrong ? " (penaliza)" : quiz.penalty_factor ? " (no penaliza)" : ""}
                                 </button>
                             )}
                             {revealed && q.explanation && (
