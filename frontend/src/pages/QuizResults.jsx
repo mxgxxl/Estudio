@@ -134,7 +134,8 @@ export default function QuizResults() {
         setReviewing(true);
         try {
             const res = await quizStart({
-                mode: "practice",
+                behavior: "practice",
+                selection: "all",
                 question_ids: failedIds,
                 num_questions: failedIds.length,
             });
@@ -145,7 +146,8 @@ export default function QuizResults() {
             }
             sessionStorage.setItem("current_quiz", JSON.stringify({
                 questions: qs,
-                mode: "practice",
+                behavior: "practice",
+                selection: "all",
                 subject_ids: [],
                 topic_ids: [],
                 time_limit_seconds: null,

@@ -2,18 +2,68 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
     Clock, Sparkles, Flame, Brain, Star, ArrowLeft,
-    Play, Loader2, AlertCircle, Sliders,
+    Play, Loader2, AlertCircle, Sliders, Layers, Info,
 } from "lucide-react";
 import { toast } from "sonner";
-import { listSubjects, listSubjectTopics, quizStart } from "@/lib/api";
+import { listSubjects, listSubjectTopics, quizStart, quizAvailable } from "@/lib/api";
 
-const MODES = [
-    { id: "practice", label: "Práctica", icon: Sparkles, desc: "Sin tiempo, feedback inmediato" },
-    { id: "exam", label: "Examen", icon: Clock, desc: "Con cronómetro y nota final" },
-    { id: "errors", label: "Errores", icon: Flame, desc: "Solo preguntas falladas" },
-    { id: "srs", label: "Repaso", icon: Brain, desc: "Repetición espaciada" },
-    { id: "favorites", label: "Favoritas", icon: Star, desc: "Las marcadas" },
+// Dos ejes independientes: COMPORTAMIENTO (cómo se juega) × SELECCIÓN (qué entra).
+const BEHAVIOR_OPTS = [
+    { id: "practice", label: "Práctica", icon: Sparkles, desc: "Feedback al instante, sin tiempo",
+      info: "Ves si aciertas nada más responder, con la explicación. Sin cronómetro. Para aprender sin presión." },
+    { id: "exam", label: "Examen", icon: Clock, desc: "Con cronómetro y nota al final",
+      info: "Simulacro: cronómetro, sin feedback hasta enviar, nota /10 con penalización. Puedes dejar preguntas en blanco." },
 ];
+const SELECTION_OPTS = [
+    { id: "all", label: "Todas", icon: Layers, desc: "Todo el temario elegido",
+      info: "Todas las preguntas de las asignaturas y temas seleccionados." },
+    { id: "errors", label: "Errores", icon: Flame, desc: "Las que has fallado antes",
+      info: "Solo preguntas con más fallos que aciertos en tu historial." },
+    { id: "srs", label: "Repaso", icon: Brain, desc: "Las que toca repasar hoy",
+      info: "Repetición espaciada: preguntas cuya fecha de repaso ya venció. Solo el modo Repaso actualiza esos intervalos." },
+    { id: "favorites", label: "Favoritas", icon: Star, desc: "Las marcadas con estrella",
+      info: "Solo las preguntas que marcaste como favoritas." },
+];
+// Mensaje de vacío por selección (para el gating sin "botón muerto").
+const SELECTION_EMPTY = {
+    errors: "No tienes preguntas falladas en esta selección.",
+    srs: "No tienes preguntas por repasar hoy en esta selección.",
+    favorites: "No tienes preguntas favoritas en esta selección.",
+};
+// Fallback de marcadores/enlaces viejos con ?mode=  → ejes.
+const MODE_TO_AXES = {
+    exam: { behavior: "exam", selection: "all" },
+    practice: { behavior: "practice", selection: "all" },
+    errors: { behavior: "practice", selection: "errors" },
+    srs: { behavior: "practice", selection: "srs" },
+    favorites: { behavior: "practice", selection: "favorites" },
+};
+
+// Tarjeta de opción de un eje, con detalle inline colapsable (patrón de la app;
+// sin tooltip/popover nuevos).
+function OptionCard({ opt, active, onSelect, testid }) {
+    const [open, setOpen] = useState(false);
+    const Icon = opt.icon;
+    return (
+        <div className="rounded-md border transition-all"
+            style={{ borderColor: active ? "var(--brand)" : "var(--border)", background: active ? "#fdf1ea" : "white" }}>
+            <div className="flex items-start">
+                <button onClick={onSelect} data-testid={testid} className="flex-1 p-3 text-left">
+                    <Icon className="w-5 h-5 mb-1.5" style={{ color: active ? "var(--brand)" : "var(--text-secondary)" }} />
+                    <div className="font-display font-bold text-sm">{opt.label}</div>
+                    <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{opt.desc}</div>
+                </button>
+                <button onClick={() => setOpen((o) => !o)} title="Más info" data-testid={`${testid}-info`}
+                    className="p-2 shrink-0 hover:opacity-70" style={{ color: "var(--text-muted)" }}>
+                    <Info className="w-3.5 h-3.5" />
+                </button>
+            </div>
+            {open && (
+                <div className="text-xs px-3 pb-3" style={{ color: "var(--text-secondary)" }}>{opt.info}</div>
+            )}
+        </div>
+    );
+}
 
 const QTYPES = [
     { id: "any", label: "Cualquier tipo" },
@@ -39,7 +89,7 @@ const PENALTIES = [
 ];
 
 // Panel de distribución de preguntas por tema
-function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQuestions, mode, questionType }) {
+function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQuestions, questionType }) {
     const total = Object.values(topicQuestions).reduce((a, b) => a + b, 0);
     const diff = totalQuestions - total;
 
@@ -163,15 +213,19 @@ function TopicDistribution({ topics, topicQuestions, setTopicQuestions, totalQue
 export default function QuizSetup() {
     const navigate = useNavigate();
     const [params] = useSearchParams();
-    const initialMode = params.get("mode") || "practice";
     const initialSubject = params.get("subject");
     const initialTopic = params.get("topic");
+    // Ejes desde la URL; con fallback al ?mode= viejo (marcadores/enlaces antiguos).
+    const legacyAxes = MODE_TO_AXES[params.get("mode")] || {};
+    const initialBehavior = params.get("behavior") || legacyAxes.behavior || "practice";
+    const initialSelection = params.get("selection") || legacyAxes.selection || "all";
 
     const [subjects, setSubjects] = useState([]);
     const [allTopics, setAllTopics] = useState({});
     const [selectedSubjects, setSelectedSubjects] = useState(new Set(initialSubject ? [initialSubject] : []));
     const [selectedTopics, setSelectedTopics] = useState(new Set(initialTopic ? [initialTopic] : []));
-    const [mode, setMode] = useState(initialMode);
+    const [behavior, setBehavior] = useState(initialBehavior);
+    const [selection, setSelection] = useState(initialSelection);
     const [questionType, setQuestionType] = useState("any");
     const [numQuestions, setNumQuestions] = useState(15);
     const [timeLimit, setTimeLimit] = useState(15);
@@ -179,6 +233,9 @@ export default function QuizSetup() {
     const [starting, setStarting] = useState(false);
     const [useDistribution, setUseDistribution] = useState(false);
     const [topicQuestions, setTopicQuestions] = useState({}); // { topicId: numQuestions }
+    // Disponibilidad de la SELECCIÓN activa (solo cuando ≠ "all"): del backend.
+    const [selectionCount, setSelectionCount] = useState(null);
+    const [countLoading, setCountLoading] = useState(false);
 
     useEffect(() => {
         listSubjects()
@@ -220,20 +277,50 @@ export default function QuizSetup() {
         return visibleTopics.filter((t) => selectedTopics.has(t.id));
     }, [visibleTopics, selectedTopics]);
 
-    // Disponibles para el TIPO elegido (no todos los tipos): así un examen de
-    // desarrollo no ofrece un número que no existe ni acaba en 404.
+    // Disponibles para el TIPO elegido (selección "Todas"): del desglose local
+    // counts_by_type (instantáneo). Alimenta también la distribución por tema.
     const totalAvailable = useMemo(
         () => activeTopics.reduce((a, t) => a + availOf(t, questionType), 0),
         [activeTopics, questionType]
     );
 
-    // Al cambiar la disponibilidad (p. ej. al pasar a "Desarrollo", que suele
-    // tener pocas), ajusta el nº pedido para no exceder lo que hay.
+    // Al cambiar la SELECCIÓN, el conteo anterior deja de valer → desconocido
+    // (null) hasta el primer fetch. Un cambio de FILTRO dentro de la misma
+    // selección NO lo resetea, así el botón no se traba en cada tweak.
     useEffect(() => {
-        if (totalAvailable > 0) {
-            setNumQuestions((n) => Math.min(Math.max(1, n), totalAvailable));
+        setSelectionCount(null);
+    }, [selection]);
+
+    // Para selecciones ≠ "all" (errores/repaso/favoritas) el conteo depende del
+    // historial: se pide al backend (debounced) al cambiar selección/filtros/tipo.
+    // El conteo previo se mantiene durante el refetch (no se pone a null aquí).
+    useEffect(() => {
+        if (selection === "all") { setCountLoading(false); return; }
+        let cancelled = false;
+        setCountLoading(true);
+        const id = setTimeout(() => {
+            quizAvailable({
+                selection,
+                subject_ids: Array.from(selectedSubjects),
+                topic_ids: Array.from(selectedTopics),
+                question_type: questionType,
+            })
+                .then((d) => { if (!cancelled) { setSelectionCount(d.count); setCountLoading(false); } })
+                .catch(() => { if (!cancelled) { setSelectionCount(0); setCountLoading(false); } });
+        }, 300);
+        return () => { cancelled = true; clearTimeout(id); };
+    }, [selection, selectedSubjects, selectedTopics, questionType]);
+
+    // Disponibilidad efectiva: "all" = local por tipo (instantáneo, nunca lo bloquea
+    // este mecanismo); resto = conteo del backend (0 mientras es desconocido).
+    const effectiveAvailable = selection === "all" ? totalAvailable : (selectionCount ?? 0);
+
+    // Ajusta el nº pedido para no exceder lo que hay.
+    useEffect(() => {
+        if (effectiveAvailable > 0) {
+            setNumQuestions((n) => Math.min(Math.max(1, n), effectiveAvailable));
         }
-    }, [totalAvailable]);
+    }, [effectiveAvailable]);
 
     // Sync distribution when numQuestions or activeTopics change
     useEffect(() => {
@@ -257,7 +344,8 @@ export default function QuizSetup() {
                     activeTopics
                         .filter(t => (topicQuestions[t.id] ?? 0) > 0)
                         .map(t => quizStart({
-                            mode,
+                            selection,
+                            behavior,
                             subject_ids: Array.from(selectedSubjects),
                             topic_ids: [t.id],
                             num_questions: topicQuestions[t.id],
@@ -273,11 +361,12 @@ export default function QuizSetup() {
                 }
             } else {
                 const data = await quizStart({
-                    mode,
+                    selection,
+                    behavior,
                     subject_ids: Array.from(selectedSubjects),
                     topic_ids: Array.from(selectedTopics),
                     num_questions: numQuestions,
-                    time_limit_minutes: mode === "exam" ? timeLimit : null,
+                    time_limit_minutes: behavior === "exam" ? timeLimit : null,
                     question_type: questionType,
                 });
                 questions = data.questions || [];
@@ -290,10 +379,11 @@ export default function QuizSetup() {
 
             sessionStorage.setItem("current_quiz", JSON.stringify({
                 questions,
-                mode,
+                selection,
+                behavior,
                 subject_ids: Array.from(selectedSubjects),
                 topic_ids: Array.from(selectedTopics),
-                time_limit_seconds: mode === "exam" ? timeLimit * 60 : null,
+                time_limit_seconds: behavior === "exam" ? timeLimit * 60 : null,
                 penalty_factor: penalty > 0 ? penalty : null,
                 question_type: questionType,
                 started_at: Date.now(),
@@ -306,11 +396,17 @@ export default function QuizSetup() {
         }
     };
 
-    const showDistributionToggle = activeTopics.length > 1 && ["practice", "exam"].includes(mode);
+    // La distribución por tema solo tiene sentido con "Todas" (las demás
+    // selecciones toman lo que exista, sin reparto manual).
+    const showDistributionToggle = selection === "all" && activeTopics.length > 1;
     const distributionTotal = Object.values(topicQuestions).reduce((a, b) => a + b, 0);
-    // Siempre exige que haya preguntas del tipo elegido; y si hay distribución
-    // manual, que se haya repartido al menos una.
-    const canStart = totalAvailable > 0
+    // Solo "espera" (botón bloqueado sin poder empezar) en la PRIMERA comprobación
+    // de una selección (conteo aún desconocido). En refetches por cambio de filtro,
+    // el botón se rige por el último conteo conocido → no se traba.
+    const checkingFirst = selection !== "all" && countLoading && selectionCount === null;
+    // Exige que la SELECCIÓN activa tenga preguntas (y, si hay distribución manual,
+    // que se haya repartido al menos una).
+    const canStart = effectiveAvailable > 0 && !checkingFirst
         && (useDistribution && showDistributionToggle ? distributionTotal > 0 : true);
 
     return (
@@ -321,24 +417,25 @@ export default function QuizSetup() {
             <span className="label-eyebrow">Configurar sesión</span>
             <h1 className="font-display text-3xl md:text-4xl font-bold mt-1 mb-8">¿Qué quieres estudiar hoy?</h1>
 
-            {/* Modo */}
+            {/* Eje 1: cómo estudiar (comportamiento) */}
+            <div className="mb-6">
+                <span className="label-eyebrow block mb-3">¿Cómo quieres estudiar?</span>
+                <div className="grid grid-cols-2 gap-2">
+                    {BEHAVIOR_OPTS.map((o) => (
+                        <OptionCard key={o.id} opt={o} active={behavior === o.id}
+                            onSelect={() => setBehavior(o.id)} testid={`behavior-${o.id}`} />
+                    ))}
+                </div>
+            </div>
+
+            {/* Eje 2: qué preguntas entran (selección) */}
             <div className="mb-8">
-                <span className="label-eyebrow block mb-3">Modo</span>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                    {MODES.map((m) => {
-                        const Icon = m.icon;
-                        const active = mode === m.id;
-                        return (
-                            <button key={m.id} onClick={() => setMode(m.id)} data-testid={`mode-${m.id}`}
-                                className="p-3 rounded-md border text-left transition-all"
-                                style={{ borderColor: active ? "var(--brand)" : "var(--border)", background: active ? "#fdf1ea" : "white" }}
-                            >
-                                <Icon className="w-5 h-5 mb-1.5" style={{ color: active ? "var(--brand)" : "var(--text-secondary)" }} />
-                                <div className="font-display font-bold text-sm">{m.label}</div>
-                                <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{m.desc}</div>
-                            </button>
-                        );
-                    })}
+                <span className="label-eyebrow block mb-3">¿Qué preguntas quieres?</span>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {SELECTION_OPTS.map((o) => (
+                        <OptionCard key={o.id} opt={o} active={selection === o.id}
+                            onSelect={() => setSelection(o.id)} testid={`selection-${o.id}`} />
+                    ))}
                 </div>
             </div>
 
@@ -451,7 +548,7 @@ export default function QuizSetup() {
                     <span className="label-eyebrow">
                         Nº de preguntas: <span className="font-mono">{numQuestions}</span>{" "}
                         <span className="font-mono" style={{ color: "var(--text-muted)" }}>
-                            (disponibles: {totalAvailable}{questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""})
+                            (disponibles: {checkingFirst ? "…" : effectiveAvailable}{questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""})
                         </span>
                     </span>
                     {showDistributionToggle && (
@@ -472,21 +569,29 @@ export default function QuizSetup() {
                 <input
                     type="range"
                     min="1"
-                    max={Math.max(1, Math.min(totalAvailable, 100))}
+                    max={Math.max(1, Math.min(effectiveAvailable, 100))}
                     value={numQuestions}
                     onChange={(e) => setNumQuestions(parseInt(e.target.value))}
-                    disabled={totalAvailable === 0}
+                    disabled={effectiveAvailable === 0}
                     data-testid="num-questions-range"
                     className="w-full accent-[color:var(--brand)] mb-4 disabled:opacity-50"
                 />
-                {totalAvailable === 0 && (
+                {checkingFirst ? (
+                    <div className="text-xs flex items-center gap-2 p-2 rounded-md mb-2"
+                        style={{ background: "var(--bg-secondary)", color: "var(--text-muted)" }}
+                        data-testid="checking-availability">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> Comprobando disponibilidad…
+                    </div>
+                ) : effectiveAvailable === 0 && (
                     <div
                         className="text-xs flex items-start gap-2 p-2 rounded-md mb-2"
                         style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
                         data-testid="no-questions-of-type"
                     >
                         <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
-                        No hay preguntas{questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""} en la selección. Genera alguna desde el tema o cambia el tipo.
+                        {selection !== "all"
+                            ? `${SELECTION_EMPTY[selection]} Prueba otra selección o cambia el tipo/filtros.`
+                            : `No hay preguntas${questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""} en la selección. Genera alguna desde el tema o cambia el tipo.`}
                     </div>
                 )}
 
@@ -497,14 +602,13 @@ export default function QuizSetup() {
                         topicQuestions={topicQuestions}
                         setTopicQuestions={setTopicQuestions}
                         totalQuestions={numQuestions}
-                        mode={mode}
                         questionType={questionType}
                     />
                 )}
             </div>
 
             {/* Tiempo (solo examen) */}
-            {mode === "exam" && (
+            {behavior === "exam" && (
                 <div className="mb-8">
                     <span className="label-eyebrow block mb-2">
                         Tiempo: <span className="font-mono">{timeLimit} min</span>

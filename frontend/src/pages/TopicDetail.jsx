@@ -205,7 +205,7 @@ export default function TopicDetail() {
                         <Layers className="w-4 h-4" /> Flashcards
                     </Link>
                     <Link
-                        to={`/quiz/setup?topic=${topic.id}&mode=practice`}
+                        to={`/quiz/setup?topic=${topic.id}&behavior=practice&selection=all`}
                         data-testid="practice-here-btn"
                         className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
                         style={{ borderColor: "var(--border)" }}

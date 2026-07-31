@@ -150,7 +150,8 @@ export default function QuestionBank() {
                 });
             }
             const res = await quizStart({
-                mode: "practice",
+                behavior: "practice",
+                selection: "all",
                 question_ids: ids,
                 num_questions: ids.length,
                 question_type: qType || "any",
@@ -162,7 +163,8 @@ export default function QuestionBank() {
             }
             sessionStorage.setItem("current_quiz", JSON.stringify({
                 questions,
-                mode: "practice",
+                behavior: "practice",
+                selection: "all",
                 subject_ids: [],
                 topic_ids: [],
                 time_limit_seconds: null,

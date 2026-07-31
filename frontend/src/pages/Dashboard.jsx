@@ -162,21 +162,21 @@ export default function Dashboard() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <QuickMode
-                        to="/quiz/setup?mode=practice"
+                        to="/quiz/setup?behavior=practice&selection=all"
                         icon={Sparkles}
                         title="Práctica"
                         desc="Sin tiempo, feedback inmediato"
                         testid="quick-practice"
                     />
                     <QuickMode
-                        to="/quiz/setup?mode=exam"
+                        to="/quiz/setup?behavior=exam&selection=all"
                         icon={Clock}
                         title="Examen"
                         desc="Cronómetro y nota final"
                         testid="quick-exam"
                     />
                     <QuickMode
-                        to="/quiz/setup?mode=errors"
+                        to="/quiz/setup?behavior=practice&selection=errors"
                         icon={Flame}
                         title="Repasar errores"
                         desc="Preguntas que has fallado"
@@ -184,7 +184,7 @@ export default function Dashboard() {
                         testid="quick-errors"
                     />
                     <QuickMode
-                        to="/quiz/setup?mode=srs"
+                        to="/quiz/setup?behavior=practice&selection=srs"
                         icon={Brain}
                         title="Repetición espaciada"
                         desc="Lo que toca repasar hoy"

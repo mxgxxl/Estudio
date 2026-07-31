@@ -88,7 +88,7 @@ export default function SubjectDetail() {
                 </div>
                 <div className="flex gap-2">
                     <Link
-                        to={`/quiz/setup?subject=${subject.id}&mode=practice`}
+                        to={`/quiz/setup?subject=${subject.id}&behavior=practice&selection=all`}
                         data-testid="practice-subject-btn"
                         className="px-4 py-2 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)] flex items-center gap-2"
                         style={{ borderColor: "var(--border)" }}
@@ -96,7 +96,7 @@ export default function SubjectDetail() {
                         <Sparkles className="w-4 h-4" /> Practicar todo
                     </Link>
                     <Link
-                        to={`/quiz/setup?subject=${subject.id}&mode=exam`}
+                        to={`/quiz/setup?subject=${subject.id}&behavior=exam&selection=all`}
                         data-testid="exam-subject-btn"
                         className="btn-primary flex items-center gap-2 text-sm"
                     >

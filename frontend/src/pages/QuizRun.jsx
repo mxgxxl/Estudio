@@ -6,14 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { quizSubmit, toggleFavorite as apiFav, toggleDifficult as apiDiff, api } from "@/lib/api";
-
-const MODE_LABELS = {
-    practice: "Práctica",
-    exam: "Examen",
-    errors: "Errores",
-    srs: "Repaso espaciado",
-    favorites: "Favoritas",
-};
+import { SELECTION_LABELS } from "@/lib/quizLabels";
 
 function formatTime(sec) {
     const m = Math.floor(sec / 60);
@@ -263,7 +256,12 @@ export default function QuizRun() {
         return () => clearInterval(t);
     }, []);
 
-    const isExam = quiz?.mode === "exam";
+    // Ejes del estudio. Fallback al `mode` viejo por si una sesión quedó en
+    // sessionStorage con el esquema anterior (ventana de despliegue de Fase 3).
+    const behavior = quiz?.behavior || (quiz?.mode === "exam" ? "exam" : "practice");
+    const selection = quiz?.selection
+        || (["errors", "srs", "favorites"].includes(quiz?.mode) ? quiz.mode : "all");
+    const isExam = behavior === "exam";
     const isPractice = !isExam;
     const timeLeft = useMemo(() => {
         if (!quiz?.time_limit_seconds) return null;
@@ -306,7 +304,8 @@ export default function QuizRun() {
             }
 
             const payload = {
-                mode: quiz.mode,
+                selection,
+                behavior,
                 subject_ids: quiz.subject_ids || [],
                 topic_ids: quiz.topic_ids || [],
                 answers: quiz.questions.map((qq, i) => ({
@@ -328,7 +327,8 @@ export default function QuizRun() {
                 answers,
                 devScores: scores,
                 devResults,  // feedback por pregunta (lo consumirá la pantalla de resultados en D)
-                mode: quiz.mode,
+                selection,
+                behavior,
             }));
             navigate("/quiz/results");
         } catch {
@@ -486,7 +486,7 @@ export default function QuizRun() {
                         )}
                         {!isExam && (
                             <span className="font-mono text-xs px-2 py-1 rounded-md" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
-                                {MODE_LABELS[quiz.mode]}
+                                {SELECTION_LABELS[selection] || "Todas"}
                             </span>
                         )}
                     </div>

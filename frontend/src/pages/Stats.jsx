@@ -5,6 +5,7 @@ import {
     Brain, FolderOpen, AlertTriangle, Zap, Loader2, RotateCcw,
 } from "lucide-react";
 import { getStats, getStatsBySubject, getStatsByTopic, getKnowledgeGaps } from "@/lib/api";
+import { attemptLabel } from "@/lib/quizLabels";
 
 const FETCHERS = {
     overview: getStats,
@@ -12,17 +13,6 @@ const FETCHERS = {
     byTopic: getStatsByTopic,
     gaps: getKnowledgeGaps,
 };
-
-// Etiquetas legibles de los dos ejes de un intento (fuente única desde Fase 2;
-// el viejo `mode` ya no se persiste). Defaults tolerantes por si un intento
-// llegara sin ejes (no debería tras la migración del histórico).
-const BEHAVIOR_LABELS = { practice: "Práctica", exam: "Examen" };
-const SELECTION_LABELS = { all: "Todas", errors: "Errores", srs: "Repaso", favorites: "Favoritas" };
-function attemptLabel(a) {
-    const b = BEHAVIOR_LABELS[a.behavior] || "Práctica";
-    const s = SELECTION_LABELS[a.selection] || "Todas";
-    return `${b} · ${s}`;
-}
 
 const Tile = ({ label, value, icon: Icon, hint }) => (
     <div className="card-organic p-5">
@@ -148,7 +138,7 @@ export default function Stats() {
                     </p>
                     <div className="card-organic divide-y" style={{ borderColor: "var(--border)" }}>
                         {gaps.data.weak_topics.map(t => (
-                            <Link key={t.topic_id} to={`/quiz/setup?topic=${t.topic_id}&mode=practice`}
+                            <Link key={t.topic_id} to={`/quiz/setup?topic=${t.topic_id}&behavior=practice&selection=all`}
                                 className="flex items-center justify-between gap-3 p-4 hover:bg-[color:var(--bg-secondary)]">
                                 <div className="flex-1 min-w-0">
                                     <div className="font-medium text-sm truncate">{t.topic_name}</div>
