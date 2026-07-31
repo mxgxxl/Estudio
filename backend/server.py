@@ -192,11 +192,11 @@ class Question(BaseModel):
 class Attempt(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
-    # Dos ejes (Fase 1). `mode` se conserva DERIVADO como puente hasta la Fase 2
-    # (stats aún lee attempt.mode); se retirará al migrar el histórico y stats.
+    # Dos ejes: SELECCIÓN (qué preguntas) × COMPORTAMIENTO (cómo se juega). Fuente
+    # ÚNICA. El viejo `mode` persistido se retiró en Fase 2 (histórico migrado a los
+    # ejes). El `mode` de REQUEST sigue vivo por compat de entrada hasta Fase 3.
     selection: Literal["all", "errors", "srs", "favorites"] = "all"
     behavior: Literal["practice", "exam"] = "practice"
-    mode: Literal["exam", "practice", "errors", "srs", "favorites"]
     subject_ids: List[str] = []
     topic_ids: List[str] = []
     question_ids: List[str]
@@ -2150,8 +2150,6 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         user_id=uid,
         selection=selection,
         behavior=behavior,
-        # `mode` derivado como puente hasta Fase 2 (stats aún lee attempt.mode).
-        mode=_derive_mode(selection, behavior),
         subject_ids=req.subject_ids,
         topic_ids=req.topic_ids,
         question_ids=[a.get("question_id") for a in req.answers],

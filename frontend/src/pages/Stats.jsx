@@ -13,6 +13,17 @@ const FETCHERS = {
     gaps: getKnowledgeGaps,
 };
 
+// Etiquetas legibles de los dos ejes de un intento (fuente única desde Fase 2;
+// el viejo `mode` ya no se persiste). Defaults tolerantes por si un intento
+// llegara sin ejes (no debería tras la migración del histórico).
+const BEHAVIOR_LABELS = { practice: "Práctica", exam: "Examen" };
+const SELECTION_LABELS = { all: "Todas", errors: "Errores", srs: "Repaso", favorites: "Favoritas" };
+function attemptLabel(a) {
+    const b = BEHAVIOR_LABELS[a.behavior] || "Práctica";
+    const s = SELECTION_LABELS[a.selection] || "Todas";
+    return `${b} · ${s}`;
+}
+
 const Tile = ({ label, value, icon: Icon, hint }) => (
     <div className="card-organic p-5">
         <div className="flex items-start justify-between">
@@ -245,7 +256,7 @@ export default function Stats() {
                         {o.last_attempts.map(a => (
                             <div key={a.id} className="flex items-center justify-between p-4">
                                 <div>
-                                    <div className="font-medium text-sm capitalize">{a.mode}{a.penalty_factor && (
+                                    <div className="font-medium text-sm">{attemptLabel(a)}{a.penalty_factor && (
                                         <span className="text-xs font-mono ml-1" style={{ color: "var(--text-muted)" }}>· −1/{a.penalty_factor}</span>
                                     )}</div>
                                     <div className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>

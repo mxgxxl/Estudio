@@ -5,8 +5,8 @@ Fase 1: dos ejes de estudio en el backend — SELECCIÓN (all|errors|srs|favorit
 Cubre:
 - quiz_start selecciona el pool por `selection` (cada valor).
 - Compat: el `mode` viejo se mapea a (selection, behavior) y da el MISMO pool.
-- quiz_submit persiste selection/behavior + `mode` derivado (puente) en Attempt,
-  con ejes nuevos y con el `mode` viejo.
+- quiz_submit persiste selection/behavior en Attempt (el `mode` ya NO se persiste,
+  Fase 2), tanto con ejes nuevos como con el `mode` viejo del request (compat).
 - SRS SOLO avanza en selection=="srs":
   * en srs avanza,
   * fuera de srs no se toca,
@@ -132,21 +132,23 @@ def test_old_mode_maps_to_same_pool(client, srv):
     assert ids(mode="exam") == ids(selection="all")
 
 
-# --- Attempt persiste los dos ejes + mode derivado -------------------------
+# --- Attempt persiste los dos ejes (mode ya NO se persiste, Fase 2) --------
 def test_attempt_persists_axes_new_and_old(client, srv):
     h, uid = _auth(client, "att@x.com")
     _insert_q(srv, uid, "a1")
 
-    # Ejes nuevos: errores jugado como examen → mode derivado LOSSY = "exam".
+    # Ejes nuevos: errores jugado como examen.
     r = _submit(client, h, [_ans("a1")], selection="errors", behavior="exam", penalty_factor=1)
     assert r.status_code == 200, r.text
     at = _attempt(srv, r.json()["attempt_id"])
-    assert at["selection"] == "errors" and at["behavior"] == "exam" and at["mode"] == "exam"
+    assert at["selection"] == "errors" and at["behavior"] == "exam"
+    assert "mode" not in at   # `mode` retirado de la persistencia
 
-    # Mode viejo: errors → (errors, practice), mode derivado "errors".
+    # Compat de ENTRADA: el `mode` viejo del request se mapea a los ejes...
     r = _submit(client, h, [_ans("a1")], mode="errors")
     at = _attempt(srv, r.json()["attempt_id"])
-    assert at["selection"] == "errors" and at["behavior"] == "practice" and at["mode"] == "errors"
+    assert at["selection"] == "errors" and at["behavior"] == "practice"
+    assert "mode" not in at   # ...pero NO se persiste como campo
 
 
 # --- SRS solo en selection=="srs" -----------------------------------------

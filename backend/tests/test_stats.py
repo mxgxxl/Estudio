@@ -75,9 +75,12 @@ def _q(srv, uid, qid, sid, tid, *, ans=0, ok=0, favorite=False, difficult=False,
     }))
 
 
-def _attempt(srv, uid, aid, streak_day, created_at, mode="practice", correct=1, total=2, score=5.0):
+def _attempt(srv, uid, aid, streak_day, created_at, selection="all", behavior="practice",
+             correct=1, total=2, score=5.0):
+    # Esquema nuevo (Fase 2): ejes selection/behavior, sin `mode`.
     _run(srv.db.attempts.insert_one({
-        "id": aid, "user_id": uid, "mode": mode, "subject_ids": [], "topic_ids": [],
+        "id": aid, "user_id": uid, "selection": selection, "behavior": behavior,
+        "subject_ids": [], "topic_ids": [],
         "question_ids": [], "answers": [], "correct_count": correct, "wrong_count": total - correct,
         "unanswered_count": 0, "total": total, "penalty_factor": None, "raw_score": float(correct),
         "score_10": score, "streak_day": streak_day, "created_at": created_at,
