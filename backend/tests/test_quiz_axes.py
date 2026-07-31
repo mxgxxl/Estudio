@@ -113,6 +113,41 @@ def test_start_response_has_axes(client, srv):
     assert body["mode"] == "exam"  # derivado
 
 
+# --- GET /quiz/available (gating por selección) ----------------------------
+def test_quiz_available_counts_by_selection(client, srv):
+    h, uid = _auth(client, "avail@x.com")
+    _insert_q(srv, uid, "av_u")
+    _insert_q(srv, uid, "av_err", times_answered=3, times_correct=1)
+    _insert_q(srv, uid, "av_fav", favorite=True)
+    _insert_q(srv, uid, "av_due", srs_next_review=PAST)
+
+    def count(**params):
+        r = client.get("/api/quiz/available", params={"topic_ids": ["t"], **params}, headers=h)
+        assert r.status_code == 200, r.text
+        return r.json()["count"]
+
+    assert count(selection="all") == 4
+    assert count(selection="errors") == 1
+    assert count(selection="favorites") == 1
+    assert count(selection="srs") == 1
+
+
+def test_quiz_available_zero_for_empty_selection(client, srv):
+    """El caso que gatea el bug: hay preguntas del tipo pero 0 de la selección."""
+    h, uid = _auth(client, "avail0@x.com")
+    _insert_q(srv, uid, "z1")  # sin fallar, sin favorita, no due (next_review futuro)
+
+    def count(**params):
+        r = client.get("/api/quiz/available", params={"topic_ids": ["t"], **params}, headers=h)
+        assert r.status_code == 200, r.text
+        return r.json()["count"]
+
+    assert count(selection="all") == 1
+    assert count(selection="errors") == 0
+    assert count(selection="srs") == 0
+    assert count(selection="favorites") == 0
+
+
 # --- compat del `mode` viejo ----------------------------------------------
 def test_old_mode_maps_to_same_pool(client, srv):
     h, uid = _auth(client, "compat@x.com")

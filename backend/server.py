@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends, Request, Query
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -1938,6 +1938,39 @@ def _derive_mode(selection: str, behavior: str) -> str:
     return "practice" if selection == "all" else selection
 
 
+def _quiz_pool_query(
+    uid: str, *, selection: str = "all",
+    subject_ids: Optional[List[str]] = None, topic_ids: Optional[List[str]] = None,
+    question_type: Optional[str] = None, num_options: Optional[int] = None,
+    question_ids: Optional[List[str]] = None,
+) -> dict:
+    """Query Mongo del pool de preguntas para un estudio, compartida por
+    `quiz_start` (obtiene el pool) y `quiz_available` (lo cuenta para el gating).
+    La SELECCIÓN es el único eje que filtra; `behavior` no interviene aquí."""
+    query: dict = {"user_id": uid}
+    if question_ids:
+        # Pool explícito (banco de preguntas). Se acota siempre por user_id.
+        query["id"] = {"$in": question_ids}
+        if question_type and question_type != "any":
+            query["question_type"] = question_type
+        return query
+    if subject_ids:
+        query["subject_id"] = {"$in": subject_ids}
+    if topic_ids:
+        query["topic_id"] = {"$in": topic_ids}
+    if question_type and question_type != "any":
+        query["question_type"] = question_type
+    if num_options:
+        query["num_options"] = int(num_options)
+    if selection == "errors":
+        query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
+    elif selection == "favorites":
+        query["favorite"] = True
+    elif selection == "srs":
+        query["srs_next_review"] = {"$lte": _now_iso()}
+    return query
+
+
 class QuizStartReq(BaseModel):
     # `mode` viejo (compat, opcional) + ejes nuevos. Al menos uno debe permitir
     # resolver la selección; si no llega ninguno se asume ("all","practice").
@@ -1958,31 +1991,12 @@ class QuizStartReq(BaseModel):
 @api.post("/quiz/start")
 async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
     selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
-    query: dict = {"user_id": current_user["id"]}
-
-    if req.question_ids:
-        # Pool explícito (banco de preguntas). Se acota siempre por user_id.
-        query["id"] = {"$in": req.question_ids}
-        if req.question_type and req.question_type != "any":
-            query["question_type"] = req.question_type
-    else:
-        if req.subject_ids:
-            query["subject_id"] = {"$in": req.subject_ids}
-        if req.topic_ids:
-            query["topic_id"] = {"$in": req.topic_ids}
-        if req.question_type and req.question_type != "any":
-            query["question_type"] = req.question_type
-        if req.num_options:
-            query["num_options"] = int(req.num_options)
-
-        # La SELECCIÓN decide qué preguntas (el behavior no interviene aquí).
-        if selection == "errors":
-            query["$expr"] = {"$gt": ["$times_answered", "$times_correct"]}
-        elif selection == "favorites":
-            query["favorite"] = True
-        elif selection == "srs":
-            now = _now_iso()
-            query["srs_next_review"] = {"$lte": now}
+    query = _quiz_pool_query(
+        current_user["id"], selection=selection,
+        subject_ids=req.subject_ids, topic_ids=req.topic_ids,
+        question_type=req.question_type, num_options=req.num_options,
+        question_ids=req.question_ids,
+    )
 
     questions = await db.questions.find(query, {"_id": 0}).to_list(5000)
     if not questions:
@@ -2056,6 +2070,27 @@ async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current
         "behavior": behavior,
         "mode": _derive_mode(selection, behavior),
     }
+
+
+@api.get("/quiz/available")
+async def quiz_available(
+    selection: str = "all",
+    subject_ids: List[str] = Query(default=[]),
+    topic_ids: List[str] = Query(default=[]),
+    question_type: Optional[str] = "any",
+    current_user: dict = Depends(get_current_user),
+):
+    """Cuántas preguntas hay para la SELECCIÓN y filtros dados (coste 0, sin IA).
+    Alimenta el gating de QuizSetup: permite bloquear el inicio con un mensaje
+    claro cuando una selección (errores/repaso/favoritas) no tiene preguntas, en
+    vez de dejar un botón muerto que acabe en 404."""
+    sel = selection if selection in _QUIZ_SELECTIONS else "all"
+    query = _quiz_pool_query(
+        current_user["id"], selection=sel,
+        subject_ids=subject_ids, topic_ids=topic_ids, question_type=question_type,
+    )
+    count = await db.questions.count_documents(query)
+    return {"count": count, "selection": sel}
 
 
 class QuizSubmitReq(BaseModel):
