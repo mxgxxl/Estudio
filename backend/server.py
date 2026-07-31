@@ -2104,6 +2104,9 @@ class QuizSubmitReq(BaseModel):
     duration_seconds: int
     time_limit_seconds: Optional[int] = None
     penalty_factor: Optional[int] = None
+    # Examen: si True (y hay penalización), un blanco cuenta como fallo y penaliza
+    # por el mismo ratio. Subordinado a la penalización (blindado en el backend).
+    blanks_count_as_wrong: bool = False
     question_type: Optional[str] = None
 
 
@@ -2129,6 +2132,10 @@ def _update_srs(q: dict, correct: bool) -> dict:
 async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]
     selection, behavior = _resolve_quiz_axes(req.mode, req.selection, req.behavior)
+    pf = req.penalty_factor
+    # El blanco solo puede "restar" si hay penalización activa (blindaje backend:
+    # la UI ya subordina el toggle a la penalización, pero no confiamos en ella).
+    blanks_as_wrong = bool(req.blanks_count_as_wrong) and bool(pf) and pf > 0
     correct = 0
     wrong = 0
     unanswered = 0
@@ -2140,7 +2147,13 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         qtype = a.get("question_type", "mcq")
 
         if selected == -1 and qtype != "dev":
-            unanswered += 1
+            # Con el toggle activo el blanco cuenta como fallo (entra en `wrong` y
+            # penaliza); si no, es neutro (unanswered). En ambos casos NO toca las
+            # stats por pregunta (un blanco no es un intento real de esa pregunta).
+            if blanks_as_wrong:
+                wrong += 1
+            else:
+                unanswered += 1
             continue
 
         if qtype == "dev":
@@ -2170,7 +2183,6 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         }
         await db.questions.update_one({"id": qid, "user_id": uid}, update)
 
-    pf = req.penalty_factor
     if pf and pf > 0:
         raw = correct - (wrong / pf)
     else:
