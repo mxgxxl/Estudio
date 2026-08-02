@@ -1912,11 +1912,31 @@ def _resolve_quiz_axes(selection: Optional[str], behavior: Optional[str]):
     return sel, beh
 
 
+async def _validate_quiz_pdf_ids(
+    uid: str, pdf_ids: Optional[List[str]], topic_ids: Optional[List[str]]
+) -> Optional[List[str]]:
+    """Valida el filtro de PDFs de un estudio (single-topic scope).
+
+    - vacío/None → None (no filtra).
+    - requiere EXACTAMENTE un tema (`len(topic_ids) == 1`): con topic explícito el
+      scope ya es ese tema, sea cual sea el subject que acompañe. 0 o >1 → 400.
+    - todos los pdf_ids deben pertenecer a ese tema (`_topic_pdf_ids`). Si no → 400.
+    """
+    if not pdf_ids:
+        return None
+    if not topic_ids or len(topic_ids) != 1:
+        raise HTTPException(status_code=400, detail="Filtrar por PDFs requiere un único tema")
+    allowed = set(await _topic_pdf_ids(uid, topic_ids[0]))
+    if any(p not in allowed for p in pdf_ids):
+        raise HTTPException(status_code=400, detail="Algún PDF no pertenece a este tema")
+    return pdf_ids
+
+
 def _quiz_pool_query(
     uid: str, *, selection: str = "all",
     subject_ids: Optional[List[str]] = None, topic_ids: Optional[List[str]] = None,
     question_type: Optional[str] = None, num_options: Optional[int] = None,
-    question_ids: Optional[List[str]] = None,
+    question_ids: Optional[List[str]] = None, pdf_ids: Optional[List[str]] = None,
 ) -> dict:
     """Query Mongo del pool de preguntas para un estudio, compartida por
     `quiz_start` (obtiene el pool) y `quiz_available` (lo cuenta para el gating).
@@ -1924,6 +1944,7 @@ def _quiz_pool_query(
     query: dict = {"user_id": uid}
     if question_ids:
         # Pool explícito (banco de preguntas). Se acota siempre por user_id.
+        # `pdf_ids` se ignora aquí a propósito: question_ids ya define el pool.
         query["id"] = {"$in": question_ids}
         if question_type and question_type != "any":
             query["question_type"] = question_type
@@ -1932,6 +1953,11 @@ def _quiz_pool_query(
         query["subject_id"] = {"$in": subject_ids}
     if topic_ids:
         query["topic_id"] = {"$in": topic_ids}
+    if pdf_ids:
+        # Filtrar por PDFs de origen concretos (single-topic; validado aparte).
+        # Ausente/vacío = todos los PDFs, incl. huérfanos (pdf_source_id None);
+        # explícito = solo esos PDFs, lo que EXCLUYE los huérfanos.
+        query["pdf_source_id"] = {"$in": pdf_ids}
     if question_type and question_type != "any":
         query["question_type"] = question_type
     if num_options:
@@ -1958,16 +1984,23 @@ class QuizStartReq(BaseModel):
     # "Practicar esta selección" del banco: si viene, el pool son EXACTAMENTE
     # estas preguntas (del usuario); se ignoran los filtros de modo/asignatura.
     question_ids: Optional[List[str]] = None
+    # Filtro de PDFs de origen (single-topic). Ausente/vacío = todos (incl.
+    # huérfanos). Ignorado si viene question_ids. Validado en el handler.
+    pdf_ids: Optional[List[str]] = None
 
 
 @api.post("/quiz/start")
 async def quiz_start(req: QuizStartReq, current_user: dict = Depends(get_current_user)):
     selection, behavior = _resolve_quiz_axes(req.selection, req.behavior)
+    # question_ids define el pool por sí solo → pdf_ids se ignora (ni se valida).
+    pdf_ids = None if req.question_ids else await _validate_quiz_pdf_ids(
+        current_user["id"], req.pdf_ids, req.topic_ids
+    )
     query = _quiz_pool_query(
         current_user["id"], selection=selection,
         subject_ids=req.subject_ids, topic_ids=req.topic_ids,
         question_type=req.question_type, num_options=req.num_options,
-        question_ids=req.question_ids,
+        question_ids=req.question_ids, pdf_ids=pdf_ids,
     )
 
     questions = await db.questions.find(query, {"_id": 0}).to_list(5000)
@@ -2047,6 +2080,7 @@ async def quiz_available(
     subject_ids: List[str] = Query(default=[]),
     topic_ids: List[str] = Query(default=[]),
     question_type: Optional[str] = "any",
+    pdf_ids: List[str] = Query(default=[]),
     current_user: dict = Depends(get_current_user),
 ):
     """Cuántas preguntas hay para la SELECCIÓN y filtros dados (coste 0, sin IA).
@@ -2054,9 +2088,11 @@ async def quiz_available(
     claro cuando una selección (errores/repaso/favoritas) no tiene preguntas, en
     vez de dejar un botón muerto que acabe en 404."""
     sel = selection if selection in _QUIZ_SELECTIONS else "all"
+    validated_pdf_ids = await _validate_quiz_pdf_ids(current_user["id"], pdf_ids, topic_ids)
     query = _quiz_pool_query(
         current_user["id"], selection=sel,
         subject_ids=subject_ids, topic_ids=topic_ids, question_type=question_type,
+        pdf_ids=validated_pdf_ids,
     )
     count = await db.questions.count_documents(query)
     return {"count": count, "selection": sel}
