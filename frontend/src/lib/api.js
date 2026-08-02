@@ -146,12 +146,13 @@ export const quizStart = (payload) => api.post("/quiz/start", payload).then((r) 
 export const quizSubmit = (payload) => api.post("/quiz/submit", payload).then((r) => r.data);
 // Conteo de preguntas de una selección + filtros (gating de QuizSetup, coste 0).
 // Construye params repetidos (topic_ids=a&topic_ids=b) para que FastAPI los ligue.
-export const quizAvailable = ({ selection = "all", subject_ids = [], topic_ids = [], question_type = "any" } = {}) => {
+export const quizAvailable = ({ selection = "all", subject_ids = [], topic_ids = [], question_type = "any", pdf_ids = [] } = {}) => {
     const p = new URLSearchParams();
     p.set("selection", selection);
     p.set("question_type", question_type);
     subject_ids.forEach((s) => p.append("subject_ids", s));
     topic_ids.forEach((t) => p.append("topic_ids", t));
+    pdf_ids.forEach((id) => p.append("pdf_ids", id));
     return api.get(`/quiz/available?${p.toString()}`).then((r) => r.data);
 };
 

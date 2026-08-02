@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
     Clock, Sparkles, Flame, Brain, Star, ArrowLeft,
-    Play, Loader2, AlertCircle, Sliders, Layers, Info,
+    Play, Loader2, AlertCircle, Sliders, Layers, Info, FileText, X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { listSubjects, listSubjectTopics, quizStart, quizAvailable } from "@/lib/api";
+import { listSubjects, listSubjectTopics, quizStart, quizAvailable, getTopicPdfs } from "@/lib/api";
+import PdfPicker from "@/components/PdfPicker";
 
 // Dos ejes independientes: COMPORTAMIENTO (cómo se juega) × SELECCIÓN (qué entra).
 const BEHAVIOR_OPTS = [
@@ -239,6 +240,11 @@ export default function QuizSetup() {
     // Disponibilidad de la SELECCIÓN activa (solo cuando ≠ "all"): del backend.
     const [selectionCount, setSelectionCount] = useState(null);
     const [countLoading, setCountLoading] = useState(false);
+    // Filtro de PDFs (solo con scope de un único tema y >1 PDF). Estado LOCAL:
+    // no viaja a URL/sessionStorage/marcadores. Todos preseleccionados por defecto.
+    const [topicPdfs, setTopicPdfs] = useState([]);
+    const [selectedPdfIds, setSelectedPdfIds] = useState(new Set());
+    const [pdfDialogOpen, setPdfDialogOpen] = useState(false);
 
     // El toggle de "blancos restan" solo aplica en Examen con penalización: si deja
     // de cumplirse, lo desmarcamos para no arrastrar un valor obsoleto.
@@ -274,6 +280,19 @@ export default function QuizSetup() {
         setSelectedTopics(next);
     };
 
+    const togglePdf = (id) => {
+        setSelectedPdfIds((prev) => {
+            const next = new Set(prev);
+            next.has(id) ? next.delete(id) : next.add(id);
+            return next;
+        });
+    };
+    const toggleAllPdfs = () => {
+        setSelectedPdfIds((prev) =>
+            prev.size === topicPdfs.length ? new Set() : new Set(topicPdfs.map((p) => p.id))
+        );
+    };
+
     const visibleTopics = useMemo(() => {
         if (selectedSubjects.size === 0) return Object.values(allTopics).flat();
         return Object.entries(allTopics)
@@ -293,6 +312,37 @@ export default function QuizSetup() {
         [activeTopics, questionType]
     );
 
+    // Scope de un único tema: única situación donde tiene sentido filtrar por PDFs
+    // (el control cross-tema vive en el Banco → "Practicar selección").
+    const singleTopicId = selectedTopics.size === 1 ? [...selectedTopics][0] : null;
+
+    // Al entrar/salir de single-topic (o cambiar de tema), recarga los PDFs del
+    // tema y reinicia la selección a "todos". Fuera de single-topic, limpia.
+    useEffect(() => {
+        if (!singleTopicId) { setTopicPdfs([]); setSelectedPdfIds(new Set()); return; }
+        let cancelled = false;
+        getTopicPdfs(singleTopicId)
+            .then((pdfs) => {
+                if (cancelled) return;
+                setTopicPdfs(pdfs);
+                setSelectedPdfIds(new Set(pdfs.map((p) => p.id)));
+            })
+            .catch(() => { if (!cancelled) { setTopicPdfs([]); setSelectedPdfIds(new Set()); } });
+        return () => { cancelled = true; };
+    }, [singleTopicId]);
+
+    // El filtro de PDFs "actúa" (manda pdf_ids) solo con un subconjunto propio:
+    // todos seleccionados = sin filtro (retro-compat, incluye huérfanos);
+    // 0 seleccionados = selección vacía (se bloquea aparte, sin llamar al backend).
+    const pdfFilterActive =
+        !!singleTopicId && topicPdfs.length > 1 &&
+        selectedPdfIds.size > 0 && selectedPdfIds.size < topicPdfs.length;
+    const pdfEmptySelection =
+        !!singleTopicId && topicPdfs.length > 1 && selectedPdfIds.size === 0;
+    // "all" se cuenta localmente salvo que haya un subconjunto de PDFs activo (que
+    // el conteo local por tema no conoce): entonces también hay que ir al backend.
+    const needsBackendCount = selection !== "all" || pdfFilterActive;
+
     // Al cambiar la SELECCIÓN, el conteo anterior deja de valer → desconocido
     // (null) hasta el primer fetch. Un cambio de FILTRO dentro de la misma
     // selección NO lo resetea, así el botón no se traba en cada tweak.
@@ -304,7 +354,7 @@ export default function QuizSetup() {
     // historial: se pide al backend (debounced) al cambiar selección/filtros/tipo.
     // El conteo previo se mantiene durante el refetch (no se pone a null aquí).
     useEffect(() => {
-        if (selection === "all") { setCountLoading(false); return; }
+        if (!needsBackendCount || pdfEmptySelection) { setCountLoading(false); return; }
         let cancelled = false;
         setCountLoading(true);
         const id = setTimeout(() => {
@@ -313,16 +363,20 @@ export default function QuizSetup() {
                 subject_ids: Array.from(selectedSubjects),
                 topic_ids: Array.from(selectedTopics),
                 question_type: questionType,
+                pdf_ids: pdfFilterActive ? [...selectedPdfIds] : [],
             })
                 .then((d) => { if (!cancelled) { setSelectionCount(d.count); setCountLoading(false); } })
                 .catch(() => { if (!cancelled) { setSelectionCount(0); setCountLoading(false); } });
         }, 300);
         return () => { cancelled = true; clearTimeout(id); };
-    }, [selection, selectedSubjects, selectedTopics, questionType]);
+    }, [selection, selectedSubjects, selectedTopics, questionType, needsBackendCount, pdfEmptySelection, pdfFilterActive, selectedPdfIds]);
 
-    // Disponibilidad efectiva: "all" = local por tipo (instantáneo, nunca lo bloquea
-    // este mecanismo); resto = conteo del backend (0 mientras es desconocido).
-    const effectiveAvailable = selection === "all" ? totalAvailable : (selectionCount ?? 0);
+    // Disponibilidad efectiva: sin PDFs seleccionados = 0; con conteo de backend
+    // (selección ≠ all o subconjunto de PDFs) = ese conteo (0 mientras es
+    // desconocido); resto ("all" sin filtro de PDFs) = local por tipo (instantáneo).
+    const effectiveAvailable = pdfEmptySelection
+        ? 0
+        : (needsBackendCount ? (selectionCount ?? 0) : totalAvailable);
 
     // Ajusta el nº pedido para no exceder lo que hay.
     useEffect(() => {
@@ -377,6 +431,8 @@ export default function QuizSetup() {
                     num_questions: numQuestions,
                     time_limit_minutes: behavior === "exam" ? timeLimit : null,
                     question_type: questionType,
+                    // Solo con un subconjunto propio de PDFs (todos = sin filtro).
+                    ...(pdfFilterActive ? { pdf_ids: [...selectedPdfIds] } : {}),
                 });
                 questions = data.questions || [];
             }
@@ -414,7 +470,7 @@ export default function QuizSetup() {
     // Solo "espera" (botón bloqueado sin poder empezar) en la PRIMERA comprobación
     // de una selección (conteo aún desconocido). En refetches por cambio de filtro,
     // el botón se rige por el último conteo conocido → no se traba.
-    const checkingFirst = selection !== "all" && countLoading && selectionCount === null;
+    const checkingFirst = needsBackendCount && !pdfEmptySelection && countLoading && selectionCount === null;
     // Exige que la SELECCIÓN activa tenga preguntas (y, si hay distribución manual,
     // que se haya repartido al menos una).
     const canStart = effectiveAvailable > 0 && !checkingFirst
@@ -512,6 +568,35 @@ export default function QuizSetup() {
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+            )}
+
+            {/* De qué PDFs (solo scope de un único tema con >1 PDF) */}
+            {singleTopicId && topicPdfs.length > 1 && (
+                <div className="mb-6">
+                    <span className="label-eyebrow block mb-3">¿De qué PDFs?</span>
+                    <div className="rounded-md border p-3 flex items-center justify-between gap-3"
+                        style={{ borderColor: "var(--border)", background: "white" }}>
+                        <div className="flex items-center gap-2 min-w-0">
+                            <FileText className="w-4 h-4 shrink-0" style={{ color: "var(--text-muted)" }} />
+                            <span className="text-sm truncate" data-testid="pdf-filter-summary">
+                                {selectedPdfIds.size === topicPdfs.length
+                                    ? `Todos los PDFs (${topicPdfs.length})`
+                                    : selectedPdfIds.size === 0
+                                        ? `Ningún PDF (de ${topicPdfs.length})`
+                                        : `${selectedPdfIds.size} de ${topicPdfs.length} PDFs`}
+                            </span>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setPdfDialogOpen(true)}
+                            data-testid="pick-pdfs-btn"
+                            className="text-xs font-medium px-3 py-1.5 rounded-md border shrink-0 hover:bg-[color:var(--bg-secondary)]"
+                            style={{ borderColor: "var(--brand)", color: "var(--brand)" }}
+                        >
+                            Elegir PDFs
+                        </button>
                     </div>
                 </div>
             )}
@@ -617,9 +702,11 @@ export default function QuizSetup() {
                         data-testid="no-questions-of-type"
                     >
                         <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: "var(--brand)" }} />
-                        {selection !== "all"
-                            ? `${SELECTION_EMPTY[selection]} Prueba otra selección o cambia el tipo/filtros.`
-                            : `No hay preguntas${questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""} en la selección. Genera alguna desde el tema o cambia el tipo.`}
+                        {pdfEmptySelection
+                            ? "Selecciona al menos un PDF."
+                            : selection !== "all"
+                                ? `${SELECTION_EMPTY[selection]} Prueba otra selección o cambia el tipo/filtros.`
+                                : `No hay preguntas${questionType !== "any" ? ` de tipo ${QTYPES.find((x) => x.id === questionType)?.label}` : ""} en la selección. Genera alguna desde el tema o cambia el tipo.`}
                     </div>
                 )}
 
@@ -659,6 +746,51 @@ export default function QuizSetup() {
                 {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                 Empezar sesión
             </button>
+
+            {/* Diálogo de selección de PDFs — PdfPicker controlado por el padre
+                (selección en vivo y persistente mientras se configura la sesión).
+                No reutiliza PdfSelectDialog (su reset-on-open no encaja aquí). */}
+            {pdfDialogOpen && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto"
+                    style={{ background: "rgba(35,33,31,0.45)" }}
+                    data-testid="quiz-pdf-dialog"
+                >
+                    <div className="card-organic w-full max-w-lg fade-up my-8" style={{ background: "white" }}>
+                        <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: "var(--border)" }}>
+                            <div>
+                                <h3 className="font-display text-xl font-bold">¿De qué PDFs?</h3>
+                                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                                    Elige de qué PDFs saldrán las preguntas de esta sesión.
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setPdfDialogOpen(false)}
+                                data-testid="quiz-pdf-close"
+                                className="p-1.5 rounded-md hover:bg-[color:var(--bg-secondary)]"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        <div className="p-5 space-y-4">
+                            <PdfPicker
+                                pdfs={topicPdfs}
+                                selected={selectedPdfIds}
+                                onToggle={togglePdf}
+                                onToggleAll={toggleAllPdfs}
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setPdfDialogOpen(false)}
+                                data-testid="quiz-pdf-done"
+                                className="btn-primary w-full text-sm"
+                            >
+                                Hecho
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
