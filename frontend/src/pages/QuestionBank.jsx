@@ -10,6 +10,10 @@ import {
     toggleFavorite as apiFav, toggleDifficult as apiDiff, deleteQuestion, quizStart,
 } from "@/lib/api";
 import EditQuestionDialog from "@/components/EditQuestionDialog";
+import CreateTopicStepper from "@/components/CreateTopicStepper";
+
+// Valor centinela del <select> de temas: no es un filtro, abre el stepper.
+const CREATE_TOPIC_VALUE = "__create__";
 
 const STATUSES = [
     { id: "all", label: "Todas" },
@@ -53,12 +57,17 @@ export default function QuestionBank() {
     const [toDelete, setToDelete] = useState(null);
     const [deleting, setDeleting] = useState(false);
     const [editing, setEditing] = useState(null);
+    const [topicStepperOpen, setTopicStepperOpen] = useState(false);
 
-    useEffect(() => {
-        Promise.all([listSubjects(), listTopics(), listPdfs()])
+    // Catálogos de filtros (asignaturas/temas/PDFs). Reutilizado tras crear un
+    // tema nuevo para que aparezca de inmediato como opción del desplegable.
+    const loadCatalogs = useCallback(() => {
+        return Promise.all([listSubjects(), listTopics(), listPdfs()])
             .then(([s, t, p]) => { setSubjects(s); setTopics(t); setPdfs(p); })
             .catch(() => toast.error("No se pudieron cargar los filtros"));
     }, []);
+
+    useEffect(() => { loadCatalogs(); }, [loadCatalogs]);
 
     // Debounce del buscador.
     useEffect(() => {
@@ -108,6 +117,25 @@ export default function QuestionBank() {
             setTopicId("");
         }
     }, [subjectId, topicId, topicsForSubject]);
+
+    // Una generación diferida (usuario cerró el stepper a mitad) que completa
+    // mientras seguimos aquí → refresca el listado para ver las preguntas nuevas.
+    useEffect(() => {
+        const onGen = () => load();
+        window.addEventListener("studia:generation-complete", onGen);
+        return () => window.removeEventListener("studia:generation-complete", onGen);
+    }, [load]);
+
+    // Al completar el stepper: enfoca los filtros en el tema recién creado (su
+    // asignatura + el tema, el resto a "todos") y recarga catálogos y listado.
+    const handleTopicCreated = async ({ subjectId: sid, topicId: tid }) => {
+        await loadCatalogs(); // el nuevo tema debe existir como opción antes de fijarlo
+        setSubjectId(sid || "");
+        setTopicId(tid || "");
+        setPdfId("");
+        setQType("");
+        setStatus("all");
+    };
 
     const patchItem = (qid, fields) =>
         setData((d) => d && { ...d, items: d.items.map((q) => (q.id === qid ? { ...q, ...fields } : q)) });
@@ -224,9 +252,21 @@ export default function QuestionBank() {
                     <option value="">Todas las asignaturas</option>
                     {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
-                <select value={topicId} onChange={(e) => setTopicId(e.target.value)} className={selectCls} style={selectStyle} data-testid="qbank-topic">
+                <select
+                    value={topicId}
+                    onChange={(e) => {
+                        // Centinela: abre el stepper y deja el filtro como estaba
+                        // (el <select> controlado revierte solo al no tocar topicId).
+                        if (e.target.value === CREATE_TOPIC_VALUE) { setTopicStepperOpen(true); return; }
+                        setTopicId(e.target.value);
+                    }}
+                    className={selectCls}
+                    style={selectStyle}
+                    data-testid="qbank-topic"
+                >
                     <option value="">Todos los temas</option>
                     {topicsForSubject.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    <option value={CREATE_TOPIC_VALUE}>+ Nuevo tema</option>
                 </select>
                 <select value={pdfId} onChange={(e) => setPdfId(e.target.value)} className={selectCls} style={selectStyle} data-testid="qbank-pdf">
                     <option value="">Todos los PDFs</option>
@@ -360,6 +400,16 @@ export default function QuestionBank() {
                 question={editing}
                 onClose={() => setEditing(null)}
                 onSaved={(updated) => { patchItem(updated.id, updated); setEditing(null); }}
+            />
+
+            {/* Stepper "Nuevo tema" (última opción del desplegable de temas).
+                preselectedSubjectId solo si hay una asignatura filtrada (no "Todas"). */}
+            <CreateTopicStepper
+                open={topicStepperOpen}
+                onOpenChange={setTopicStepperOpen}
+                subjects={subjects}
+                preselectedSubjectId={subjectId || null}
+                onComplete={handleTopicCreated}
             />
         </div>
     );
