@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { listSubjects, listSubjectTopics, quizStart, quizAvailable, getTopicPdfs } from "@/lib/api";
 import PdfPicker from "@/components/PdfPicker";
 import CreateSubjectStepper from "@/components/CreateSubjectStepper";
+import CreateTopicStepper from "@/components/CreateTopicStepper";
 
 // Dos ejes independientes: COMPORTAMIENTO (cómo se juega) × SELECCIÓN (qué entra).
 const BEHAVIOR_OPTS = [
@@ -295,6 +296,8 @@ export default function QuizSetup() {
     const [pdfDialogOpen, setPdfDialogOpen] = useState(false);
     // Stepper "Nueva asignatura" (ghost card).
     const [stepperOpen, setStepperOpen] = useState(false);
+    // Stepper "Nuevo tema" (ghost card).
+    const [topicStepperOpen, setTopicStepperOpen] = useState(false);
 
     // El toggle de "blancos restan" solo aplica en Examen con penalización: si deja
     // de cumplirse, lo desmarcamos para no arrastrar un valor obsoleto.
@@ -333,6 +336,15 @@ export default function QuizSetup() {
     const handleStepperComplete = ({ subjectId }) => {
         if (subjectId) {
             setSelectedSubjects((prev) => (prev.size === 0 ? prev : new Set([...prev, subjectId])));
+        }
+        loadData();
+    };
+
+    // Al completar el stepper de tema: si había selección PARCIAL de temas, suma el
+    // nuevo (si estaba en "todos" —vacío— ya entra por definición). Luego refresca.
+    const handleTopicStepperComplete = ({ topicId }) => {
+        if (topicId) {
+            setSelectedTopics((prev) => (prev.size === 0 ? prev : new Set([...prev, topicId])));
         }
         loadData();
     };
@@ -640,7 +652,7 @@ export default function QuizSetup() {
                         <GhostCard
                             label="Nuevo tema"
                             testid="new-topic-ghost"
-                            onClick={() => console.log("TODO: abrir stepper")}
+                            onClick={() => setTopicStepperOpen(true)}
                         />
                     </div>
                 </div>
@@ -826,6 +838,16 @@ export default function QuizSetup() {
                 open={stepperOpen}
                 onClose={() => setStepperOpen(false)}
                 onComplete={handleStepperComplete}
+            />
+
+            {/* Stepper "Nuevo tema" (ghost card). preselectedSubjectId solo cuando
+                hay exactamente 1 asignatura en selección; si no, el stepper pregunta. */}
+            <CreateTopicStepper
+                open={topicStepperOpen}
+                onOpenChange={setTopicStepperOpen}
+                subjects={subjects}
+                preselectedSubjectId={selectedSubjects.size === 1 ? [...selectedSubjects][0] : null}
+                onComplete={handleTopicStepperComplete}
             />
 
             {/* Diálogo de selección de PDFs — PdfPicker controlado por el padre
