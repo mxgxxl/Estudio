@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
     Clock, Sparkles, Flame, Brain, Star, ArrowLeft,
-    Play, Loader2, AlertCircle, Sliders, Layers, Info, FileText, X,
+    Play, Loader2, AlertCircle, Sliders, Layers, Info, FileText, X, Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { listSubjects, listSubjectTopics, quizStart, quizAvailable, getTopicPdfs } from "@/lib/api";
@@ -63,6 +63,53 @@ function OptionCard({ opt, active, onSelect, testid }) {
                 <div className="text-xs px-3 pb-3" style={{ color: "var(--text-secondary)" }}>{opt.info}</div>
             )}
         </div>
+    );
+}
+
+// Tarjeta seleccionable reutilizable (asignaturas y temas): dot de color opcional
+// + nombre + contador. Estado activo con el coral de la app (`--brand`), igual que
+// los temas; hover sutil en el borde. El borde va por clase (no inline) para que
+// el :hover funcione. La selección multi la sigue gestionando el padre.
+function SelectableCard({ name, count, color, active, onClick, testid }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            data-testid={testid}
+            className={`p-3 rounded-md border flex items-center justify-between gap-2 transition-all text-left cursor-pointer ${
+                active
+                    ? "border-[color:var(--brand)] bg-[#fdf1ea]"
+                    : "border-[color:var(--border)] bg-white hover:border-[color:var(--brand)]"
+            }`}
+        >
+            <span className="flex items-center gap-2 min-w-0">
+                {color && (
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+                )}
+                <span className="font-medium text-sm truncate">{name}</span>
+            </span>
+            <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm shrink-0"
+                style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
+                {count}
+            </span>
+        </button>
+    );
+}
+
+// Ghost card "+ Nueva …": última tarjeta del grid, borde punteado sin fondo,
+// para el futuro stepper de creación. onClick aún sin cablear (TODO).
+function GhostCard({ label, onClick, testid }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            data-testid={testid}
+            className="p-3 rounded-md border border-dashed flex items-center justify-center gap-1.5 transition-all cursor-pointer border-[color:var(--border)] bg-transparent hover:border-[color:var(--brand)] hover:bg-[color:var(--bg-secondary)]"
+            style={{ color: "var(--text-secondary)" }}
+        >
+            <Plus className="w-4 h-4 shrink-0" />
+            <span className="text-sm font-medium">{label}</span>
+        </button>
     );
 }
 
@@ -509,7 +556,13 @@ export default function QuizSetup() {
             {/* Asignaturas */}
             <div className="mb-6">
                 <div className="flex items-center justify-between mb-3">
-                    <span className="label-eyebrow">Asignaturas {selectedSubjects.size === 0 && "(todas)"}</span>
+                    <span className="label-eyebrow">
+                        Asignaturas{" "}
+                        {subjects.length > 0 &&
+                            (selectedSubjects.size === 0 || selectedSubjects.size === subjects.length
+                                ? "(todas)"
+                                : `(${selectedSubjects.size} de ${subjects.length})`)}
+                    </span>
                     {selectedSubjects.size > 0 && (
                         <button data-testid="clear-subjects" onClick={() => setSelectedSubjects(new Set())}
                             className="text-xs font-medium hover:underline" style={{ color: "var(--brand)" }}>
@@ -517,27 +570,24 @@ export default function QuizSetup() {
                         </button>
                     )}
                 </div>
-                {subjects.length === 0 ? (
-                    <div className="card-organic p-5 text-sm" style={{ color: "var(--text-muted)" }}>No tienes asignaturas.</div>
-                ) : (
-                    <div className="flex flex-wrap gap-2">
-                        {subjects.map((s) => {
-                            const active = selectedSubjects.has(s.id);
-                            return (
-                                <button key={s.id} onClick={() => toggleSubject(s.id)} data-testid={`subject-toggle-${s.id}`}
-                                    className="px-3 py-2 rounded-md border flex items-center gap-2 transition-all text-sm font-medium"
-                                    style={{ borderColor: active ? s.color : "var(--border)", background: active ? `${s.color}18` : "white" }}
-                                >
-                                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: s.color }} />
-                                    {s.name}
-                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm" style={{ background: "var(--bg-secondary)" }}>
-                                        {s.question_count}
-                                    </span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                )}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {subjects.map((s) => (
+                        <SelectableCard
+                            key={s.id}
+                            name={s.name}
+                            count={s.question_count}
+                            color={s.color}
+                            active={selectedSubjects.has(s.id)}
+                            onClick={() => toggleSubject(s.id)}
+                            testid={`subject-toggle-${s.id}`}
+                        />
+                    ))}
+                    <GhostCard
+                        label="Nueva asignatura"
+                        testid="new-subject-ghost"
+                        onClick={() => console.log("TODO: abrir stepper")}
+                    />
+                </div>
             </div>
 
             {/* Temas */}
@@ -553,21 +603,21 @@ export default function QuizSetup() {
                         )}
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {visibleTopics.map((t) => {
-                            const active = selectedTopics.has(t.id);
-                            return (
-                                <button key={t.id} onClick={() => toggleTopic(t.id)} data-testid={`topic-toggle-${t.id}`}
-                                    className="p-3 rounded-md border flex items-center justify-between transition-all text-left"
-                                    style={{ borderColor: active ? "var(--brand)" : "var(--border)", background: active ? "#fdf1ea" : "white" }}
-                                >
-                                    <span className="font-medium text-sm">{t.name}</span>
-                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm"
-                                        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
-                                        {t.question_count}
-                                    </span>
-                                </button>
-                            );
-                        })}
+                        {visibleTopics.map((t) => (
+                            <SelectableCard
+                                key={t.id}
+                                name={t.name}
+                                count={t.question_count}
+                                active={selectedTopics.has(t.id)}
+                                onClick={() => toggleTopic(t.id)}
+                                testid={`topic-toggle-${t.id}`}
+                            />
+                        ))}
+                        <GhostCard
+                            label="Nuevo tema"
+                            testid="new-topic-ghost"
+                            onClick={() => console.log("TODO: abrir stepper")}
+                        />
                     </div>
                 </div>
             )}
