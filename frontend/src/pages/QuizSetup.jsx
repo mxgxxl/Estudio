@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
     Clock, Sparkles, Flame, Brain, Star, ArrowLeft,
@@ -7,6 +7,7 @@ import {
 import { toast } from "sonner";
 import { listSubjects, listSubjectTopics, quizStart, quizAvailable, getTopicPdfs } from "@/lib/api";
 import PdfPicker from "@/components/PdfPicker";
+import CreateSubjectStepper from "@/components/CreateSubjectStepper";
 
 // Dos ejes independientes: COMPORTAMIENTO (cómo se juega) × SELECCIÓN (qué entra).
 const BEHAVIOR_OPTS = [
@@ -292,6 +293,8 @@ export default function QuizSetup() {
     const [topicPdfs, setTopicPdfs] = useState([]);
     const [selectedPdfIds, setSelectedPdfIds] = useState(new Set());
     const [pdfDialogOpen, setPdfDialogOpen] = useState(false);
+    // Stepper "Nueva asignatura" (ghost card).
+    const [stepperOpen, setStepperOpen] = useState(false);
 
     // El toggle de "blancos restan" solo aplica en Examen con penalización: si deja
     // de cumplirse, lo desmarcamos para no arrastrar un valor obsoleto.
@@ -299,8 +302,10 @@ export default function QuizSetup() {
         if (behavior !== "exam" || penalty === 0) setBlanksCountAsWrong(false);
     }, [behavior, penalty]);
 
-    useEffect(() => {
-        listSubjects()
+    // Carga (o recarga) asignaturas + sus temas. Reutilizado tras crear una
+    // asignatura nueva desde el stepper o al completar una generación diferida.
+    const loadData = useCallback(() => {
+        return listSubjects()
             .then((subs) => {
                 setSubjects(subs);
                 return Promise.all(subs.map((s) => listSubjectTopics(s.id).then((ts) => ({ id: s.id, topics: ts }))));
@@ -312,6 +317,25 @@ export default function QuizSetup() {
             })
             .catch(() => toast.error("Error cargando datos"));
     }, []);
+
+    useEffect(() => { loadData(); }, [loadData]);
+
+    // Si una generación diferida (usuario cerró el stepper a mitad) completa
+    // mientras seguimos aquí, refresca para que aparezcan sus preguntas.
+    useEffect(() => {
+        const onGen = () => loadData();
+        window.addEventListener("studia:generation-complete", onGen);
+        return () => window.removeEventListener("studia:generation-complete", onGen);
+    }, [loadData]);
+
+    // Al completar el stepper: si había selección PARCIAL de asignaturas, suma la
+    // nueva (si estaba en "todas" —vacío— ya entra por definición). Luego refresca.
+    const handleStepperComplete = ({ subjectId }) => {
+        if (subjectId) {
+            setSelectedSubjects((prev) => (prev.size === 0 ? prev : new Set([...prev, subjectId])));
+        }
+        loadData();
+    };
 
     const toggleSubject = (sid) => {
         const next = new Set(selectedSubjects);
@@ -585,7 +609,7 @@ export default function QuizSetup() {
                     <GhostCard
                         label="Nueva asignatura"
                         testid="new-subject-ghost"
-                        onClick={() => console.log("TODO: abrir stepper")}
+                        onClick={() => setStepperOpen(true)}
                     />
                 </div>
             </div>
@@ -796,6 +820,13 @@ export default function QuizSetup() {
                 {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                 Empezar sesión
             </button>
+
+            {/* Stepper "Nueva asignatura" (ghost card) */}
+            <CreateSubjectStepper
+                open={stepperOpen}
+                onClose={() => setStepperOpen(false)}
+                onComplete={handleStepperComplete}
+            />
 
             {/* Diálogo de selección de PDFs — PdfPicker controlado por el padre
                 (selección en vivo y persistente mientras se configura la sesión).

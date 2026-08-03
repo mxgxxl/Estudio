@@ -21,12 +21,14 @@ import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { AuthProvider } from "@/context/AuthContext";
+import { PendingGenerationProvider } from "@/context/PendingGenerationContext";
 
 function App() {
     return (
         <div className="App">
             <BrowserRouter>
                 <AuthProvider>
+                  <PendingGenerationProvider>
                     <Routes>
                         {/* Rutas públicas */}
                         <Route path="/login" element={<Login />} />
@@ -57,6 +59,7 @@ function App() {
                             </Route>
                         </Route>
                     </Routes>
+                  </PendingGenerationProvider>
                 </AuthProvider>
             </BrowserRouter>
             <Toaster
