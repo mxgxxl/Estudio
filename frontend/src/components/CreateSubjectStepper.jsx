@@ -201,6 +201,7 @@ export default function CreateSubjectStepper({ open, onClose, onComplete }) {
         setGenStatus("generating");
         setGenError(null);
         const p = generateFromTopicPdfs(topicId, {
+            pdf_ids: attachedPdfs.map((pdf) => pdf.id),
             num_questions: numQuestions,
             question_type: questionType,
             num_options: numOptions,
