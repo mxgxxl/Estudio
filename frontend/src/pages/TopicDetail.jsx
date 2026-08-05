@@ -30,6 +30,7 @@ import {
 } from "@/lib/api";
 import GenerateDialog from "@/components/GenerateDialog";
 import AddPdfDialog from "@/components/AddPdfDialog";
+import CreateQuestionDialog from "@/components/CreateQuestionDialog";
 import SummaryPanel from "@/components/SummaryPanel";
 
 export default function TopicDetail() {
@@ -41,6 +42,7 @@ export default function TopicDetail() {
     const [genOpen, setGenOpen] = useState(false);
     const [genDefault, setGenDefault] = useState(null);
     const [addOpen, setAddOpen] = useState(false);
+    const [createOpen, setCreateOpen] = useState(false);
     const [pdfToRemove, setPdfToRemove] = useState(null); // PDF pendiente de quitar/borrar
     const [removing, setRemoving] = useState(false);
     // Resúmenes cacheados por PDF: mapa pdf_id -> content (JSON de Gemini).
@@ -227,6 +229,14 @@ export default function TopicDetail() {
                             style={{ borderColor: "var(--border)" }}
                         >
                             <Plus className="w-3.5 h-3.5" /> Añadir PDF
+                        </button>
+                        <button
+                            onClick={() => setCreateOpen(true)}
+                            data-testid="create-question-btn"
+                            className="px-3 py-1.5 rounded-md border text-xs font-medium flex items-center gap-1 hover:bg-[color:var(--bg-secondary)]"
+                            style={{ borderColor: "var(--border)" }}
+                        >
+                            <Plus className="w-3.5 h-3.5" /> Crear pregunta
                         </button>
                         <button
                             onClick={() => {
@@ -479,6 +489,16 @@ export default function TopicDetail() {
                 currentPdfIds={pdfs.map((p) => p.id)}
                 onClose={() => setAddOpen(false)}
                 onUploaded={load}
+            />
+
+            {/* Alta manual con el tema fijo; el PDF de origen se elige entre los del tema. */}
+            <CreateQuestionDialog
+                open={createOpen}
+                onClose={() => setCreateOpen(false)}
+                fixedTopic
+                defaultSubjectId={topic.subject_id || null}
+                defaultTopicId={topic.id}
+                onCreated={load}
             />
 
             {pdfToRemove && (

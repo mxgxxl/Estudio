@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
     Search, Star, Flag, Trash2, Check, Sparkles, Loader2, ChevronLeft,
-    ChevronRight, ExternalLink, Pencil, ListChecks,
+    ChevronRight, ExternalLink, Pencil, ListChecks, Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -10,6 +10,7 @@ import {
     toggleFavorite as apiFav, toggleDifficult as apiDiff, deleteQuestion, quizStart,
 } from "@/lib/api";
 import EditQuestionDialog from "@/components/EditQuestionDialog";
+import CreateQuestionDialog from "@/components/CreateQuestionDialog";
 import CreateTopicStepper from "@/components/CreateTopicStepper";
 
 // Valor centinela del <select> de temas: no es un filtro, abre el stepper.
@@ -57,6 +58,7 @@ export default function QuestionBank() {
     const [toDelete, setToDelete] = useState(null);
     const [deleting, setDeleting] = useState(false);
     const [editing, setEditing] = useState(null);
+    const [createOpen, setCreateOpen] = useState(false);
     const [topicStepperOpen, setTopicStepperOpen] = useState(false);
 
     // Catálogos de filtros (asignaturas/temas/PDFs). Reutilizado tras crear un
@@ -221,15 +223,25 @@ export default function QuestionBank() {
                 <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
                     Todas tus preguntas generadas, en un solo sitio. Filtra, busca y practica lo que quieras.
                 </p>
-                <button
-                    onClick={practiceSelection}
-                    disabled={practicing || total === 0}
-                    data-testid="practice-selection-btn"
-                    className="btn-primary flex items-center gap-2 text-sm shrink-0 disabled:opacity-50"
-                >
-                    {practicing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                    Practicar selección
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                    <button
+                        onClick={() => setCreateOpen(true)}
+                        data-testid="create-question-btn"
+                        className="px-4 py-2 rounded-md border font-medium text-sm flex items-center gap-2 hover:bg-[color:var(--bg-secondary)]"
+                        style={{ borderColor: "var(--border)" }}
+                    >
+                        <Plus className="w-4 h-4" /> Crear pregunta
+                    </button>
+                    <button
+                        onClick={practiceSelection}
+                        disabled={practicing || total === 0}
+                        data-testid="practice-selection-btn"
+                        className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50"
+                    >
+                        {practicing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                        Practicar selección
+                    </button>
+                </div>
             </div>
 
             {/* Buscador */}
@@ -400,6 +412,17 @@ export default function QuestionBank() {
                 question={editing}
                 onClose={() => setEditing(null)}
                 onSaved={(updated) => { patchItem(updated.id, updated); setEditing(null); }}
+            />
+
+            {/* Alta manual: destino precargado desde los filtros activos. El PDF
+                filtrado solo se preselecciona si es un id real (no el centinela "none"). */}
+            <CreateQuestionDialog
+                open={createOpen}
+                onClose={() => setCreateOpen(false)}
+                defaultSubjectId={subjectId || null}
+                defaultTopicId={topicId || null}
+                defaultPdfId={pdfId && pdfId !== "none" ? pdfId : null}
+                onCreated={() => load()}
             />
 
             {/* Stepper "Nuevo tema" (última opción del desplegable de temas).
