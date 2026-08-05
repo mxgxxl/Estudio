@@ -1667,6 +1667,92 @@ async def delete_question(question_id: str, current_user: dict = Depends(get_cur
     return {"ok": True}
 
 
+class ManualQuestionCreate(BaseModel):
+    """Autoría manual de una pregunta (sin IA). Los campos de la API se traducen
+    al schema interno de `Question` (question_text→question, correct_answer→
+    correct_index, dev_answer→model_answer) para ser indistinguible de las
+    generadas. La validación cruzada por tipo va en el handler (422 con mensaje)."""
+    topic_id: str
+    question_type: str
+    question_text: str
+    options: Optional[List[str]] = None
+    correct_answer: Optional[int] = None
+    dev_answer: Optional[str] = None
+    explanation: Optional[str] = None
+    num_options: Optional[int] = None
+
+
+@api.post("/questions", status_code=201)
+async def create_manual_question(req: ManualQuestionCreate, current_user: dict = Depends(get_current_user)):
+    """Crea una pregunta escrita por el usuario. NO llama a Gemini ni consume
+    cuota. Mismo documento que las generadas por IA (sin campo `source`, que hoy
+    tampoco tienen), para que sean indistinguibles en quizzes y banco."""
+    uid = current_user["id"]
+
+    qtype = req.question_type
+    if qtype not in ("mcq", "tf", "dev"):
+        raise HTTPException(status_code=422, detail="question_type debe ser 'mcq', 'tf' o 'dev'")
+
+    text = (req.question_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="El enunciado no puede estar vacío")
+
+    # El tema debe existir y pertenecer al usuario. 404 (no 403) para no revelar
+    # la existencia de temas de otros usuarios.
+    topic = await db.topics.find_one({"id": req.topic_id, "user_id": uid}, {"_id": 0})
+    if not topic:
+        raise HTTPException(status_code=404, detail="Tema no encontrado")
+
+    options: List[str] = []
+    correct_index = 0
+    model_answer = ""
+    num_options = 2
+
+    if qtype == "mcq":
+        opts = [str(o).strip() for o in (req.options or [])]
+        if len(opts) < 2 or len(opts) > 5:
+            raise HTTPException(status_code=422, detail="Una pregunta de opción múltiple necesita entre 2 y 5 opciones")
+        if any(not o for o in opts):
+            raise HTTPException(status_code=422, detail="Las opciones no pueden estar vacías")
+        if req.correct_answer is None or not (0 <= req.correct_answer < len(opts)):
+            raise HTTPException(status_code=422, detail="correct_answer debe ser el índice (0-based) de una de las opciones")
+        options = opts
+        correct_index = req.correct_answer
+        num_options = len(opts)
+    elif qtype == "tf":
+        if req.correct_answer not in (0, 1):
+            raise HTTPException(status_code=422, detail="En verdadero/falso, correct_answer debe ser 0 (verdadero) o 1 (falso)")
+        options = ["Verdadero", "Falso"]
+        correct_index = req.correct_answer
+        num_options = 2
+    else:  # dev
+        model_answer = (req.dev_answer or "").strip()
+        if not model_answer:
+            raise HTTPException(status_code=422, detail="Una pregunta de desarrollo necesita una respuesta modelo (dev_answer)")
+        options = []
+        correct_index = 0
+        num_options = 0
+
+    q = Question(
+        user_id=uid,
+        topic_id=req.topic_id,
+        topic_name=topic["name"],
+        subject_id=topic.get("subject_id"),
+        pdf_source_id=None,
+        question_type=qtype,
+        num_options=num_options,
+        question=text,
+        options=options,
+        correct_index=correct_index,
+        explanation=(req.explanation or "").strip(),
+        model_answer=model_answer,
+    )
+    # Insertar una copia y devolver otra limpia: insert_one inyecta `_id`
+    # (ObjectId no serializable) en el dict que recibe (patrón de create_subject).
+    await db.questions.insert_one(q.model_dump())
+    return q.model_dump()
+
+
 # ---- Banco de preguntas (listado global con filtros) ----
 # Cap de ids devueltos por /questions/ids: es el tamaño máximo de pool
 # "practicable" de una vez. Si el filtro tiene más, se avisa en la UI con el
