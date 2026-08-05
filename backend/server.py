@@ -2229,6 +2229,11 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
     correct = 0
     wrong = 0
     unanswered = 0
+    # Fallos MCQ/VF: los ÚNICOS que penalizan (los dev están exentos, ver abajo).
+    wrong_nondev = 0
+    # Crédito para la nota: 1.0 por acierto MCQ/VF; dev_score/10 (0.0-1.0) por dev.
+    # Es la fuente de `raw`/`score_10` (los conteos enteros son solo para tiles/SRS).
+    points = 0.0
     total = len(req.answers)
     for a in req.answers:
         qid = a.get("question_id")
@@ -2245,11 +2250,20 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
             continue
 
         if qtype == "dev":
-            # Dev answers are evaluated separately; count as answered
+            # Dev answers are evaluated separately; count as answered.
             dev_score = float(a.get("dev_score", 0))
             is_correct = dev_score >= 5
+            # Crédito PROPORCIONAL: un dev aporta dev_score/10 a la nota, incluido el
+            # blanco (dev_score 0 → 0). El umbral >=5 solo define "acertada" para los
+            # conteos/tiles/SRS. Los dev NO entran en `wrong_nondev` → exentos de
+            # penalización (esta es anti-azar de MCQ/VF, no aplica a respuesta abierta).
+            points += dev_score / 10.0
         else:
             is_correct = selected == correct_index
+            if is_correct:
+                points += 1.0
+            else:
+                wrong_nondev += 1
 
         if is_correct:
             correct += 1
@@ -2271,13 +2285,15 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
         }
         await db.questions.update_one({"id": qid, "user_id": uid}, update)
 
-    # Los blancos penalizan como un fallo si el toggle está activo, pero se cuentan
-    # aparte (unanswered); aquí entran en el cómputo de la nota junto a los fallos.
-    penalized = wrong + (unanswered if blanks_as_wrong else 0)
+    # Solo penalizan los fallos MCQ/VF (`wrong_nondev`; los dev están exentos) y, con
+    # el toggle activo, los blancos MCQ/VF (unanswered; los dev en blanco llegan como
+    # wrong con dev_score=0 y NO cuentan aquí). La nota parte de `points` (crédito
+    # proporcional), no del conteo entero de aciertos.
+    penalized = wrong_nondev + (unanswered if blanks_as_wrong else 0)
     if pf and pf > 0:
-        raw = correct - (penalized / pf)
+        raw = points - (penalized / pf)
     else:
-        raw = float(correct)
+        raw = points
     if raw < 0:
         raw = 0.0
     score_10 = round((raw / total) * 10, 2) if total else 0.0

@@ -193,7 +193,7 @@ export default function QuizResults() {
                     </div>
                     {penalty_factor && (
                         <div className="text-xs mt-1 font-mono" style={{ color: "var(--text-muted)" }}>
-                            Bruto: {raw_score} sobre {total}
+                            Bruto: {parseFloat(Number(raw_score).toFixed(2))} sobre {total}
                         </div>
                     )}
                 </div>
