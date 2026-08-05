@@ -137,6 +137,10 @@ export const listQuestionIds = (filters = {}) => {
 };
 
 // Questions
+// Alta MANUAL (sin IA, sin cuota). El backend espera estos nombres de campo:
+// { topic_id, question_type, question_text, options?, correct_answer?,
+//   dev_answer?, explanation?, num_options?, pdf_source_id? }.
+export const createQuestion = (payload) => api.post("/questions", payload).then((r) => r.data);
 export const toggleFavorite = (qid) => api.post(`/questions/${qid}/favorite`).then((r) => r.data);
 export const toggleDifficult = (qid) => api.post(`/questions/${qid}/difficult`).then((r) => r.data);
 export const deleteQuestion = (qid) => api.delete(`/questions/${qid}`).then((r) => r.data);
