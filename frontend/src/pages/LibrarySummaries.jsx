@@ -167,6 +167,7 @@ export default function LibrarySummaries() {
                                     <div className="mt-2">
                                         <SummaryPanel
                                             summary={r.content}
+                                            pdfFilename={r.pdf_filename ?? "resumen"}
                                             onRegenerate={() => regenerate(r.pdf_id)}
                                             regenerating={regenId === r.pdf_id}
                                             onClose={() => setOpenId(null)}

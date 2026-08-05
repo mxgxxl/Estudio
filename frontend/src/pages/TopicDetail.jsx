@@ -335,6 +335,7 @@ export default function TopicDetail() {
                                 <div className="mt-2">
                                     <SummaryPanel
                                         summary={summaries[p.id]}
+                                        pdfFilename={p.filename}
                                         onRegenerate={() => genSummary(p.id)}
                                         regenerating={summaryLoadingId === p.id}
                                         onClose={() => setOpenSummaryId(null)}
