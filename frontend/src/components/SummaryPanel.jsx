@@ -47,7 +47,7 @@ export default function SummaryPanel({ summary, onRegenerate, regenerating = fal
                                 <FileText className="w-4 h-4" /> Descargar Markdown (.md)
                             </DropdownMenuItem>
                             <DropdownMenuItem onClick={onExportPdf} data-testid="summary-export-pdf" className="gap-2 cursor-pointer">
-                                <Printer className="w-4 h-4" /> Exportar a PDF
+                                <Printer className="w-4 h-4" /> Imprimir / Guardar PDF
                             </DropdownMenuItem>
                         </DropdownMenuContent>
                     </DropdownMenu>

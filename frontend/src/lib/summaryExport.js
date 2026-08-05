@@ -170,11 +170,17 @@ export function downloadMarkdown(md, filename) {
 // Abre una ventana aislada con el resumen maquetado y lanza el diálogo de impresión
 // (el usuario elige "Guardar como PDF"). Lanza Error("popup-blocked") si está bloqueada.
 export function printSummaryAsPdf(content, filename) {
-    const win = window.open("", "_blank", "noopener,noreferrer");
+    // SIN "noopener": ese flag hace que window.open devuelva null SIEMPRE (spec
+    // HTML) y perderíamos el handle para escribir/imprimir. Necesitamos el handle;
+    // el guard de abajo queda para bloqueos REALES de popup.
+    const win = window.open("", "_blank");
     if (!win) throw new Error("popup-blocked");
 
     const title = sanitizeFilename(filename);
     const body = summaryToHtml(content, filename);
+    // El disparo de print() va INYECTADO en el HTML (window.onload interno): es la
+    // vía fiable para documentos escritos con document.write, sin depender de
+    // onload/readyState desde fuera. La ventana queda abierta para "Guardar como PDF".
     const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -193,14 +199,10 @@ export function printSummaryAsPdf(content, filename) {
 </head>
 <body>
 ${body}
+<script>window.onload = function () { window.focus(); window.print(); };</script>
 </body>
 </html>`;
     win.document.write(html);
     win.document.close();
-    // Imprimir cuando el documento esté listo; no cerramos la ventana después
-    // para que el usuario pueda revisar/guardar.
-    const doPrint = () => win.print();
-    if (win.document.readyState === "complete") doPrint();
-    else win.onload = doPrint;
     return true;
 }
