@@ -200,10 +200,11 @@ class TestAiQuota:
         orig = srv.generate_questions_with_claude
         srv.generate_questions_with_claude = _boom
         try:
-            # El fallo se propaga (no es 402). TestClient re-lanza la excepción
-            # del servidor; lo importante es que el endpoint reembolse antes.
-            with pytest.raises(RuntimeError):
-                _generate(client, h, topic_id, pdf_id)
+            # Todo-o-nada: si la generación de una fuente falla, el endpoint captura
+            # la excepción (asyncio.gather), reembolsa la cuota y responde 502 (no
+            # propaga el error crudo ni es 402).
+            r = _generate(client, h, topic_id, pdf_id)
+            assert r.status_code == 502, r.text
         finally:
             srv.generate_questions_with_claude = orig
 

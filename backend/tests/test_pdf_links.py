@@ -20,10 +20,17 @@ def _fake_extract_pdf_text(_b: bytes) -> str:
 
 async def _fake_generate_questions(topic_name, source_text, num_questions,
                                    question_type="mcq", num_options=3, custom_instructions=""):
+    # Sentinela para el test de "todo-o-nada": esta fuente hace fallar su llamada.
+    if "__FAIL__" in source_text:
+        raise RuntimeError("boom en generación")
+    # Devuelve EXACTAMENTE num_questions (para verificar el reparto por PDF) y marca
+    # cada pregunta con un fragmento de source_text (para verificar la atribución:
+    # una pregunta de p1 debe llevar el texto de p1). Patrón de test_flashcard_source.
+    tag = source_text[:16]
     return [{
-        "question": f"P{i} {topic_name}", "options": ["A", "B", "C"], "correct_index": 0,
+        "question": f"P{i} [{tag}]", "options": ["A", "B", "C"], "correct_index": 0,
         "explanation": "", "question_type": "mcq", "num_options": 3, "model_answer": "",
-    } for i in range(3)]
+    } for i in range(num_questions)]
 
 
 async def _fake_generate_flashcards(topic_name, source_text, num_cards):
@@ -33,10 +40,22 @@ async def _fake_generate_flashcards(topic_name, source_text, num_cards):
 @pytest.fixture(scope="module")
 def srv():
     import server
+    # HIGIENE: server es un singleton; guardamos los originales y los RESTAURAMOS al
+    # terminar el módulo para no contaminar otros tests que corran en el mismo proceso
+    # (antes este fixture dejaba parcheado generate_questions_with_claude y rompía p.
+    # ej. test_quota_breakdown.py al correrlo detrás de este archivo).
+    orig_extract = server.extract_pdf_text
+    orig_gen_q = server.generate_questions_with_claude
+    orig_gen_fc = server._generate_flashcards_from_text
     server.extract_pdf_text = _fake_extract_pdf_text
     server.generate_questions_with_claude = _fake_generate_questions
     server._generate_flashcards_from_text = _fake_generate_flashcards
-    return server
+    try:
+        yield server
+    finally:
+        server.extract_pdf_text = orig_extract
+        server.generate_questions_with_claude = orig_gen_q
+        server._generate_flashcards_from_text = orig_gen_fc
 
 
 @pytest.fixture(scope="module")
@@ -101,6 +120,15 @@ def _add_pdf(client, h, topic_id):
 
 def _link(srv, uid, pdf_id, topic_id, subject_id=None):
     asyncio.run(srv._link_pdf_to_topic(uid, pdf_id, topic_id, subject_id))
+
+
+def _set_pdf_text(srv, uid, pdf_id, text, char_count=1000):
+    # Caja blanca: fija texto (distinto por PDF) y char_count (igual, para un reparto
+    # determinista) directamente en mongo, sin depender del extractor mockeado.
+    asyncio.run(srv.db.pdfs.update_one(
+        {"id": pdf_id, "user_id": uid},
+        {"$set": {"text": text, "char_count": char_count}},
+    ))
 
 
 def _links_count(srv, uid, pdf_id):
@@ -487,3 +515,100 @@ class TestLibraryUpload:
         assert r.status_code == 400
         # Requiere autenticación.
         assert client.post("/api/pdfs", files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")}).status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Atribución por PDF en la generación de preguntas.
+# Bug corregido: con 2+ PDFs, el texto se concatenaba en UNA llamada y todas las
+# preguntas caían en pdfs[0]. Ahora: reparto proporcional (_distribute_cards), una
+# llamada por PDF en paralelo, atribución pdf_source_id por fuente, todo-o-nada.
+# --------------------------------------------------------------------------
+class TestGenerateAttribution:
+    def _empty_topic(self, client, h, subject_id):
+        t = client.post(f"/api/subjects/{subject_id}/topics", json={"name": "T"}, headers=h)
+        assert t.status_code == 200, t.text
+        return t.json()["id"]
+
+    def test_multi_pdf_distributes_and_attributes_by_source(self, client, srv):
+        uid = _register(client, "gen_multi@t.com")
+        h = _login(client, "gen_multi@t.com")
+        s = _subject(client, h, "S")
+        tid = self._empty_topic(client, h, s)
+        pa = _add_pdf(client, h, tid)
+        pb = _add_pdf(client, h, tid)
+        # Textos distintos + char_count iguales -> reparto determinista 3/3 con 6.
+        _set_pdf_text(srv, uid, pa, "ALPHA_SOURCE " * 20)
+        _set_pdf_text(srv, uid, pb, "BETA_SOURCE " * 20)
+
+        g = client.post(f"/api/topics/{tid}/generate",
+                        json={"pdf_ids": [pa, pb], "num_questions": 6}, headers=h)
+        assert g.status_code == 200, g.text
+        assert g.json()["questions_created"] == 6
+        assert set(g.json()["pdf_ids_used"]) == {pa, pb}
+
+        qs = asyncio.run(srv.db.questions.find(
+            {"user_id": uid, "topic_id": tid}, {"_id": 0}).to_list(100))
+        by_a = [q for q in qs if q["pdf_source_id"] == pa]
+        by_b = [q for q in qs if q["pdf_source_id"] == pb]
+        # Se reparte (NO todas al primero, que era el bug)...
+        assert len(by_a) == 3 and len(by_b) == 3
+        # ...y cada pregunta lleva el texto de SU PDF (routing correcto por fuente).
+        assert all("ALPHA" in q["question"] for q in by_a)
+        assert all("BETA" in q["question"] for q in by_b)
+
+    def test_proportional_split_by_char_count(self, client, srv):
+        uid = _register(client, "gen_prop@t.com")
+        h = _login(client, "gen_prop@t.com")
+        s = _subject(client, h, "S")
+        tid = self._empty_topic(client, h, s)
+        pa = _add_pdf(client, h, tid)
+        pb = _add_pdf(client, h, tid)
+        # pa triplica a pb en char_count -> 9 preguntas se reparten ~ 3:1.
+        _set_pdf_text(srv, uid, pa, "ALPHA", char_count=3000)
+        _set_pdf_text(srv, uid, pb, "BETA", char_count=1000)
+
+        g = client.post(f"/api/topics/{tid}/generate",
+                        json={"pdf_ids": [pa, pb], "num_questions": 8}, headers=h)
+        assert g.status_code == 200, g.text
+        qs = asyncio.run(srv.db.questions.find(
+            {"user_id": uid, "topic_id": tid}, {"_id": 0}).to_list(100))
+        na = sum(1 for q in qs if q["pdf_source_id"] == pa)
+        nb = sum(1 for q in qs if q["pdf_source_id"] == pb)
+        assert na == 6 and nb == 2  # 8 * 3/4 y 8 * 1/4
+
+    def test_single_pdf_no_regression(self, client, srv):
+        uid = _register(client, "gen_single@t.com")
+        h = _login(client, "gen_single@t.com")
+        s = _subject(client, h, "S")
+        tid = self._empty_topic(client, h, s)
+        pa = _add_pdf(client, h, tid)
+        _set_pdf_text(srv, uid, pa, "SOLO_SOURCE " * 20)
+
+        g = client.post(f"/api/topics/{tid}/generate",
+                        json={"pdf_ids": [pa], "num_questions": 6}, headers=h)
+        assert g.status_code == 200, g.text
+        assert g.json()["questions_created"] == 6
+        qs = asyncio.run(srv.db.questions.find(
+            {"user_id": uid, "topic_id": tid}, {"_id": 0}).to_list(100))
+        assert len(qs) == 6 and all(q["pdf_source_id"] == pa for q in qs)
+
+    def test_all_or_nothing_refund_on_source_failure(self, client, srv):
+        uid = _register(client, "gen_fail@t.com")
+        h = _login(client, "gen_fail@t.com")
+        s = _subject(client, h, "S")
+        tid = self._empty_topic(client, h, s)
+        pa = _add_pdf(client, h, tid)
+        pb = _add_pdf(client, h, tid)
+        _set_pdf_text(srv, uid, pa, "OK_SOURCE " * 20)
+        _set_pdf_text(srv, uid, pb, "__FAIL__ " * 20)  # esta fuente revienta
+
+        used_before = client.get("/api/usage/me", headers=h).json()["used"]
+        g = client.post(f"/api/topics/{tid}/generate",
+                        json={"pdf_ids": [pa, pb], "num_questions": 6}, headers=h)
+        assert g.status_code == 502, g.text
+        # Nada persistido (ni siquiera de la fuente que sí funcionó): todo-o-nada.
+        n = asyncio.run(srv.db.questions.count_documents({"user_id": uid, "topic_id": tid}))
+        assert n == 0
+        # Cuota reembolsada: el contador queda como estaba antes de intentar.
+        used_after = client.get("/api/usage/me", headers=h).json()["used"]
+        assert used_after == used_before

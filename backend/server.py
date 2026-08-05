@@ -1575,45 +1575,62 @@ async def generate_from_topic_pdfs(topic_id: str, req: GenerateFromPdfsReq, curr
     if not pdfs:
         raise HTTPException(status_code=404, detail="No se encontraron PDFs")
 
-    parts = []
-    for p in pdfs:
-        parts.append(f"=== Fuente: {p['filename']} ===\n{p['text']}")
-    combined = "\n\n".join(parts)
-
     nopts = max(2, min(5, int(req.num_options))) if req.question_type == "mcq" else 2
-    # Comprobar plan + cuota ANTES de llamar a Gemini.
-    await check_and_consume_ai_quota(current_user, gen_kind="questions")
-    try:
-        generated = await generate_questions_with_claude(
-            topic["name"], combined, req.num_questions,
-            question_type=req.question_type, num_options=nopts,
-            custom_instructions=req.custom_instructions or "",
-        )
-    except Exception:
-        await _refund_ai_quota(current_user, gen_kind="questions")
-        raise
 
-    primary_pdf_id = pdfs[0]["id"]
+    # Reparto POR PDF (como flashcards): cada pregunta se atribuye al PDF del que
+    # realmente sale. Repartimos num_questions proporcional al char_count y hacemos
+    # una llamada a Gemini por PDF, en paralelo. Los PDFs con 0 asignadas no se llaman.
+    alloc = _distribute_cards(req.num_questions, [max(0, int(p.get("char_count", 0))) for p in pdfs])
+    targets = [(p, n) for p, n in zip(pdfs, alloc) if n > 0]
+
+    # Comprobar plan + cuota ANTES de llamar a Gemini (1 unidad para toda la
+    # operación, aunque genere de N PDFs).
+    await check_and_consume_ai_quota(current_user, gen_kind="questions")
+
+    # Una llamada por PDF (con SOLO su texto; sin cabecera de nombre de fichero),
+    # en PARALELO (la espera ≈ la más lenta, no la suma).
+    results = await asyncio.gather(
+        *[
+            generate_questions_with_claude(
+                topic["name"], p["text"], n,
+                question_type=req.question_type, num_options=nopts,
+                custom_instructions=req.custom_instructions or "",
+            )
+            for p, n in targets
+        ],
+        return_exceptions=True,
+    )
+
     docs = []
-    for g in generated:
-        q = Question(
-            user_id=uid,
-            topic_id=topic_id,
-            topic_name=topic["name"],
-            subject_id=topic.get("subject_id"),
-            pdf_source_id=primary_pdf_id,
-            question_type=g["question_type"],
-            num_options=g["num_options"],
-            question=g["question"],
-            options=g["options"],
-            correct_index=g["correct_index"],
-            explanation=g.get("explanation", ""),
-            model_answer=g.get("model_answer", ""),
-        )
-        docs.append(q.model_dump())
-    if docs:
-        await db.questions.insert_many(docs)
-    return {"questions_created": len(docs), "pdf_ids_used": [p["id"] for p in pdfs]}
+    for (p, _n), res in zip(targets, results):
+        # Todo-o-nada: si alguna fuente falla (excepción o [] por error de la IA),
+        # revertimos la cuota y abortamos (sin resultados parciales).
+        if isinstance(res, Exception) or not res:
+            await _refund_ai_quota(current_user, gen_kind="questions")
+            raise HTTPException(status_code=502, detail="No se pudieron generar preguntas")
+        for g in res:
+            q = Question(
+                user_id=uid,
+                topic_id=topic_id,
+                topic_name=topic["name"],
+                subject_id=topic.get("subject_id"),
+                pdf_source_id=p["id"],
+                question_type=g["question_type"],
+                num_options=g["num_options"],
+                question=g["question"],
+                options=g["options"],
+                correct_index=g["correct_index"],
+                explanation=g.get("explanation", ""),
+                model_answer=g.get("model_answer", ""),
+            )
+            docs.append(q.model_dump())
+
+    if not docs:
+        await _refund_ai_quota(current_user, gen_kind="questions")
+        raise HTTPException(status_code=502, detail="No se pudieron generar preguntas")
+
+    await db.questions.insert_many(docs)
+    return {"questions_created": len(docs), "pdf_ids_used": [p["id"] for p, _n in targets]}
 
 
 # ---- Questions ----
