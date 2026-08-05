@@ -1697,6 +1697,8 @@ class ManualQuestionCreate(BaseModel):
     dev_answer: Optional[str] = None
     explanation: Optional[str] = None
     num_options: Optional[int] = None
+    # PDF de origen opcional; si viene, debe ser un PDF del tema (y del usuario).
+    pdf_source_id: Optional[str] = None
 
 
 @api.post("/questions", status_code=201)
@@ -1719,6 +1721,14 @@ async def create_manual_question(req: ManualQuestionCreate, current_user: dict =
     topic = await db.topics.find_one({"id": req.topic_id, "user_id": uid}, {"_id": 0})
     if not topic:
         raise HTTPException(status_code=404, detail="Tema no encontrado")
+
+    # PDF de origen opcional: si viene, debe estar vinculado a ESTE tema (y al
+    # usuario). Mismo helper que generación/quiz → una pregunta manual no puede
+    # atribuirse a un PDF ajeno o de otro tema. None = pregunta libre.
+    pdf_source_id = req.pdf_source_id
+    if pdf_source_id is not None:
+        if pdf_source_id not in await _topic_pdf_ids(uid, req.topic_id):
+            raise HTTPException(status_code=422, detail="El PDF de origen no pertenece a este tema")
 
     options: List[str] = []
     correct_index = 0
@@ -1755,7 +1765,7 @@ async def create_manual_question(req: ManualQuestionCreate, current_user: dict =
         topic_id=req.topic_id,
         topic_name=topic["name"],
         subject_id=topic.get("subject_id"),
-        pdf_source_id=None,
+        pdf_source_id=pdf_source_id,
         question_type=qtype,
         num_options=num_options,
         question=text,

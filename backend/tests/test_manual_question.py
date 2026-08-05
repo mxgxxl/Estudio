@@ -182,6 +182,63 @@ def test_topic_of_other_user_404(client):
     assert r.status_code == 404, r.text
 
 
+# --- pdf_source_id opcional (validado contra los PDFs del tema) ------------
+def _uid_of(srv, tid):
+    return asyncio.run(srv.db.topics.find_one({"id": tid}))["user_id"]
+
+
+def _link_pdf(srv, uid, pdf_id, topic_id, subject_id=None):
+    asyncio.run(srv._link_pdf_to_topic(uid, pdf_id, topic_id, subject_id))
+
+
+def test_create_with_valid_pdf_source_id_201(client, srv):
+    h = _auth(client, "mq_pdf_ok@x.com")
+    sid, tid = _make_topic(client, h)
+    uid = _uid_of(srv, tid)
+    _link_pdf(srv, uid, "pdfA", tid, sid)  # PDF vinculado a ESTE tema
+    r = _create(client, h, topic_id=tid, question_type="tf",
+                question_text="Con PDF", correct_answer=0, pdf_source_id="pdfA")
+    assert r.status_code == 201, r.text
+    q = r.json()
+    assert q["pdf_source_id"] == "pdfA"
+    assert _get_q(srv, q["id"])["pdf_source_id"] == "pdfA"  # persistido
+
+
+def test_create_with_pdf_of_other_user_422(client, srv):
+    """Un PDF vinculado por OTRO usuario no vale (no está en _topic_pdf_ids del tema)."""
+    h_owner = _auth(client, "mq_pdf_owner@x.com")
+    sid_o, tid_o = _make_topic(client, h_owner, subject="AsigO", topic="TemaO")
+    uid_o = _uid_of(srv, tid_o)
+    _link_pdf(srv, uid_o, "pdfOwner", tid_o, sid_o)
+    h_other = _auth(client, "mq_pdf_intruder@x.com")
+    sid_x, tid_x = _make_topic(client, h_other, subject="AsigX", topic="TemaX")
+    r = _create(client, h_other, topic_id=tid_x, question_type="tf",
+                question_text="PDF ajeno", correct_answer=0, pdf_source_id="pdfOwner")
+    assert r.status_code == 422, r.text
+
+
+def test_create_with_pdf_not_linked_to_topic_422(client, srv):
+    """El PDF existe para el usuario pero vinculado a OTRO tema, no a este → 422."""
+    h = _auth(client, "mq_pdf_unlinked@x.com")
+    sid, tid = _make_topic(client, h)
+    uid = _uid_of(srv, tid)
+    t2 = client.post(f"/api/subjects/{sid}/topics", json={"name": "Otro tema"}, headers=h)
+    tid2 = t2.json()["id"]
+    _link_pdf(srv, uid, "pdfElsewhere", tid2, sid)  # vinculado a tid2, no a tid
+    r = _create(client, h, topic_id=tid, question_type="tf",
+                question_text="PDF de otro tema", correct_answer=0, pdf_source_id="pdfElsewhere")
+    assert r.status_code == 422, r.text
+
+
+def test_create_without_pdf_source_id_still_none(client, srv):
+    h = _auth(client, "mq_pdf_none@x.com")
+    _, tid = _make_topic(client, h)
+    r = _create(client, h, topic_id=tid, question_type="tf",
+                question_text="Sin PDF", correct_answer=0)
+    assert r.status_code == 201, r.text
+    assert r.json()["pdf_source_id"] is None
+
+
 # --- sin cuota: crear manual NO consume generaciones -----------------------
 def test_manual_does_not_consume_quota(client):
     h = _auth(client, "mq_quota@x.com")
