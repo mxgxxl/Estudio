@@ -167,31 +167,30 @@ export function downloadMarkdown(md, filename) {
     return true;
 }
 
-// Genera un PDF REAL (texto seleccionable/buscable) con jsPDF y lo abre en el visor
-// nativo del navegador (ver + descargar). jsPDF se carga de forma DIFERIDA (import
-// dinámico) para no engordar el bundle inicial. Lanza Error("popup-blocked") si el
-// navegador bloquea la pestaña del visor. Async.
-export async function exportSummaryAsPdf(content, filename) {
-    const { jsPDF } = await import("jspdf");
-    const title = sanitizeFilename(filename);
-    const { obj, raw } = normalizeContent(content);
+// ---------------------------------------------------------------------------
+// Fontanería jsPDF reutilizable (compartida por resúmenes e intentos).
+// ---------------------------------------------------------------------------
 
-    // Unidad en puntos (pt) para trabajar con tamaños tipográficos directos.
+// Carga DIFERIDA de jsPDF (import dinámico) cacheada: el chunk no engorda el
+// bundle inicial y no se reimporta en exports sucesivos. Devuelve la clase jsPDF.
+let _jsPdfPromise = null;
+export function loadJsPdf() {
+    if (!_jsPdfPromise) _jsPdfPromise = import("jspdf").then((m) => m.jsPDF);
+    return _jsPdfPromise;
+}
+
+// Crea un documento A4 (pt) con helpers de layout `block`/`bullet` que envuelven
+// el texto (splitTextToSize) y paginan solos. helvetica (fuente estándar) cubre
+// acentos/ñ vía Latin-1; se evitan emojis (las fuentes core no los renderizan).
+export function createPdfLayout(jsPDF) {
     const doc = new jsPDF({ unit: "pt", format: "a4" });
-    // helvetica (fuente estándar) cubre acentos y ñ vía Latin-1; se evitan emojis
-    // (las fuentes estándar de jsPDF no los renderizan → "Recuerda" sin 💡).
     const margin = 48;
-    const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
-    const maxW = pageW - margin * 2;
+    const maxW = doc.internal.pageSize.getWidth() - margin * 2;
     const BULLET_INDENT = 14;
     let y = margin;
 
-    // Salto de página si la siguiente línea no cabe.
-    const ensure = (h) => {
-        if (y + h > pageH - margin) { doc.addPage(); y = margin; }
-    };
-    // Bloque de texto con wrap (doc.splitTextToSize). `indent` en pt; `gap` tras el bloque.
+    const ensure = (h) => { if (y + h > pageH - margin) { doc.addPage(); y = margin; } };
     const block = (text, { size = 11, style = "normal", indent = 0, gap = 6 } = {}) => {
         if (text == null || String(text).trim() === "") return;
         doc.setFont("helvetica", style);
@@ -205,7 +204,6 @@ export async function exportSummaryAsPdf(content, filename) {
         }
         y += gap;
     };
-    // Bullet con sangría colgante: el "•" solo en la primera línea, el texto envuelto.
     const bullet = (text, { size = 11, style = "normal", gap = 4 } = {}) => {
         if (text == null || String(text).trim() === "") return;
         doc.setFont("helvetica", style);
@@ -221,8 +219,36 @@ export async function exportSummaryAsPdf(content, filename) {
         });
         y += gap;
     };
+    const spacer = (gap = 4) => { y += gap; };
 
-    // Título (nombre del PDF sanitizado).
+    return { doc, block, bullet, spacer, BULLET_INDENT };
+}
+
+// Genera el blob del `doc` y lo abre en el visor PDF nativo del navegador (ver +
+// descargar). SIN "noopener": necesitamos el handle para detectar el bloqueo real
+// de popup → lanza Error("popup-blocked"). El object URL se revoca con retardo
+// (el visor lo necesita para cargar).
+export function openPdfInViewer(doc, filename) {
+    if (filename) doc.setProperties({ title: sanitizeFilename(filename) });
+    const blob = doc.output("blob");
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    if (!win) {
+        URL.revokeObjectURL(url);
+        throw new Error("popup-blocked");
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return true;
+}
+
+// Genera un PDF REAL (texto seleccionable/buscable) del resumen y lo abre en el
+// visor nativo. Async. Lanza Error("popup-blocked") si el visor queda bloqueado.
+export async function exportSummaryAsPdf(content, filename) {
+    const jsPDF = await loadJsPdf();
+    const title = sanitizeFilename(filename);
+    const { obj, raw } = normalizeContent(content);
+    const { doc, block, bullet, spacer, BULLET_INDENT } = createPdfLayout(jsPDF);
+
     block(title, { size: 19, style: "bold", gap: 12 });
 
     if (!obj) {
@@ -250,7 +276,7 @@ export async function exportSummaryAsPdf(content, filename) {
             if (!stitle && !points.length) continue;
             block(stitle || "Sección", { size: 14, style: "bold", gap: 6 });
             for (const p of points) bullet(String(p).trim(), { size: 11 });
-            y += 4;
+            spacer(4);
         }
 
         const remember = (Array.isArray(obj.remember) ? obj.remember : []).filter((r) => r != null && String(r).trim());
@@ -260,18 +286,5 @@ export async function exportSummaryAsPdf(content, filename) {
         }
     }
 
-    doc.setProperties({ title });
-
-    // Blob → visor nativo en pestaña nueva (SIN noopener: necesitamos el handle para
-    // detectar el bloqueo real de popup). No revocamos el URL de inmediato (el visor
-    // lo necesita para cargar); limpieza diferida generosa.
-    const blob = doc.output("blob");
-    const url = URL.createObjectURL(blob);
-    const win = window.open(url, "_blank");
-    if (!win) {
-        URL.revokeObjectURL(url);
-        throw new Error("popup-blocked");
-    }
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-    return true;
+    return openPdfInViewer(doc, title);
 }
