@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Download, FileText, FileDown } from "lucide-react";
+import { toast } from "sonner";
 import { getAttempt } from "@/lib/api";
+import {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import AttemptReview from "@/components/AttemptReview";
+import { downloadAttemptMarkdown, exportAttemptAsPdf } from "@/lib/attemptExport";
 
 // Detalle de un intento del historial (/stats/intentos/:id). Reutiliza
 // AttemptReview. Los intentos legacy sin snapshot se muestran degradados
@@ -13,6 +21,23 @@ export default function AttemptDetail() {
     const [attempt, setAttempt] = useState(null);
     const [loading, setLoading] = useState(true);
     const [notFound, setNotFound] = useState(false);
+    const [exportingPdf, setExportingPdf] = useState(false);
+
+    const onDownloadMd = () => {
+        downloadAttemptMarkdown(attempt);
+        toast.success("Intento descargado");
+    };
+    const onExportPdf = async () => {
+        if (exportingPdf) return;
+        setExportingPdf(true);
+        try {
+            await exportAttemptAsPdf(attempt);
+        } catch {
+            toast.error("Permite las ventanas emergentes para ver el PDF");
+        } finally {
+            setExportingPdf(false);
+        }
+    };
 
     useEffect(() => {
         let alive = true;
@@ -27,14 +52,43 @@ export default function AttemptDetail() {
 
     return (
         <div className="max-w-3xl mx-auto px-5 md:px-8 py-8 md:py-12">
-            <button
-                onClick={() => navigate(-1)}
-                data-testid="attempt-back"
-                className="flex items-center gap-1.5 text-sm mb-6 hover:underline"
-                style={{ color: "var(--text-secondary)" }}
-            >
-                <ArrowLeft className="w-4 h-4" /> Volver al historial
-            </button>
+            <div className="flex items-center justify-between gap-3 mb-6">
+                <button
+                    onClick={() => navigate(-1)}
+                    data-testid="attempt-back"
+                    className="flex items-center gap-1.5 text-sm hover:underline"
+                    style={{ color: "var(--text-secondary)" }}
+                >
+                    <ArrowLeft className="w-4 h-4" /> Volver al historial
+                </button>
+                {attempt && !loading && !notFound && (
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <button
+                                data-testid="attempt-export"
+                                className="px-3 py-1.5 rounded-md border text-sm font-medium flex items-center gap-1.5 hover:bg-[color:var(--bg-secondary)]"
+                                style={{ borderColor: "var(--border)" }}
+                            >
+                                <Download className="w-4 h-4" /> Exportar
+                            </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={onDownloadMd} data-testid="attempt-export-md" className="gap-2 cursor-pointer">
+                                <FileText className="w-4 h-4" /> Descargar Markdown (.md)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                                onSelect={(e) => { e.preventDefault(); onExportPdf(); }}
+                                disabled={exportingPdf}
+                                data-testid="attempt-export-pdf"
+                                className="gap-2 cursor-pointer"
+                            >
+                                {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                                Exportar a PDF
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                )}
+            </div>
 
             <span className="label-eyebrow">Intento</span>
             <h1 className="font-display text-3xl md:text-4xl font-bold mt-1 mb-6">Detalle del intento</h1>
