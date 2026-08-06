@@ -9,6 +9,7 @@ import QuizRun from "@/pages/QuizRun";
 import QuizResults from "@/pages/QuizResults";
 import TopicDetail from "@/pages/TopicDetail";
 import Stats from "@/pages/Stats";
+import AttemptDetail from "@/pages/AttemptDetail";
 import FlashcardMode from "@/pages/FlashcardMode";
 import SurvivalMode from "@/pages/SurvivalMode";
 import Account from "@/pages/Account";
@@ -43,6 +44,7 @@ function App() {
                                 <Route path="/quiz/results" element={<QuizResults />} />
                                 <Route path="/temas/:id" element={<TopicDetail />} />
                                 <Route path="/stats" element={<Stats />} />
+                                <Route path="/stats/intentos/:id" element={<AttemptDetail />} />
                                 {/* Biblioteca: página paraguas con pestañas (PDFs · Preguntas · Resúmenes) */}
                                 <Route path="/biblioteca" element={<Biblioteca />}>
                                     <Route index element={<Navigate to="/biblioteca/pdfs" replace />} />
