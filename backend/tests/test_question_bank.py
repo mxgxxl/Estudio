@@ -215,3 +215,56 @@ def test_quiz_start_respects_num_questions(client, dataset):
     }, headers=h)
     assert r.status_code == 200, r.text
     assert len(r.json()["questions"]) == 2
+
+
+# --------------------------------------------------------------------------
+# random_sample: muestreo aleatorio uniforme ($sample), acotado al CAP y aislado.
+# --------------------------------------------------------------------------
+def _seed_user(client, srv, email, n):
+    """Registra un usuario y le inserta n preguntas con ids prefijados por email."""
+    uid = _register_id(client, email)
+    h = _login(client, email)
+    prefix = email.split("@")[0]
+    for i in range(n):
+        _insert(srv, id=f"{prefix}_{i}", user_id=uid)
+    return uid, h
+
+
+def test_random_sample_returns_exactly_n(client, srv):
+    _, h = _seed_user(client, srv, "rsN@x.com", 20)
+    body = _get(client, h, "/api/questions/ids?random_sample=5")
+    assert body["sampled"] is True and body["capped"] is False
+    assert body["total"] == 20
+    assert len(body["ids"]) == 5
+    assert len(set(body["ids"])) == 5                 # sin repetidos
+    assert all(i.startswith("rsN_") for i in body["ids"])  # todos del filtro/usuario
+
+
+def test_random_sample_user_isolation(client, srv):
+    """A pide 50 aleatorias sin filtros de scope: solo salen SUS preguntas."""
+    _seed_user(client, srv, "rsA@x.com", 10)
+    _seed_user(client, srv, "rsB@x.com", 10)  # otro usuario, no debe colarse
+    ha = _login(client, "rsA@x.com")
+    body = _get(client, ha, "/api/questions/ids?random_sample=50")
+    assert body["total"] == 10                        # solo las de A
+    assert len(body["ids"]) == 10                     # min(50, CAP, 10)
+    assert all(i.startswith("rsA_") for i in body["ids"])
+
+
+def test_random_sample_zero_422(client, srv):
+    _, h = _seed_user(client, srv, "rs0@x.com", 3)
+    assert client.get("/api/questions/ids?random_sample=0", headers=h).status_code == 422
+    assert client.get("/api/questions/ids?random_sample=-1", headers=h).status_code == 422
+
+
+def test_random_sample_over_cap(client, srv):
+    _, h = _seed_user(client, srv, "rsCap@x.com", 10)
+    orig = srv.QUESTIONS_IDS_CAP
+    srv.QUESTIONS_IDS_CAP = 3
+    try:
+        body = _get(client, h, "/api/questions/ids?random_sample=100")
+        assert body["sampled"] is True
+        assert body["total"] == 10
+        assert len(body["ids"]) == 3                   # acotado al CAP
+    finally:
+        srv.QUESTIONS_IDS_CAP = orig

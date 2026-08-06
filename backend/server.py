@@ -1877,13 +1877,18 @@ async def list_question_ids(
     question_type: Optional[str] = None,
     status: str = "all",
     q: Optional[str] = None,
+    random_sample: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """IDs de todas las preguntas del filtro (para 'practicar esta selección').
+    """IDs de las preguntas del filtro (para 'practicar esta selección').
 
-    Devuelve como mucho QUESTIONS_IDS_CAP ids, pero SIEMPRE el `total` real y
-    `capped` para que la UI avise ("practicando 500 de 800"), sin recortes
-    silenciosos.
+    Dos modos:
+    - Por defecto: los QUESTIONS_IDS_CAP más recientes, con `total` real y `capped`
+      para que la UI avise ("practicando 500 de 800") sin recortes silenciosos.
+    - `random_sample=N`: muestra ALEATORIA UNIFORME de tamaño N (acotado al CAP)
+      sobre TODO el conjunto filtrado, vía `$sample` de Mongo. Devuelve exactamente
+      min(N, CAP, total) ids; `capped=false` (se pidió una cantidad concreta).
+    El filtro (incl. `user_id`) es el mismo en ambos modos: el $sample NO se lo salta.
     """
     uid = current_user["id"]
     if status not in _QUESTION_STATUSES:
@@ -1893,6 +1898,19 @@ async def list_question_ids(
         question_type=question_type, status=status, q=q,
     )
     total = await db.questions.count_documents(query)
+
+    if random_sample is not None:
+        if random_sample < 1:
+            raise HTTPException(status_code=422, detail="random_sample debe ser >= 1")
+        size = min(random_sample, QUESTIONS_IDS_CAP)
+        rows = await db.questions.aggregate([
+            {"$match": query},
+            {"$sample": {"size": size}},
+            {"$project": {"_id": 0, "id": 1}},
+        ]).to_list(size)
+        ids = [r["id"] for r in rows]
+        return {"ids": ids, "total": total, "capped": False, "sampled": True}
+
     rows = await (
         db.questions.find(query, {"_id": 0, "id": 1})
         .sort([("created_at", -1)])
@@ -1900,7 +1918,7 @@ async def list_question_ids(
         .to_list(QUESTIONS_IDS_CAP)
     )
     ids = [r["id"] for r in rows]
-    return {"ids": ids, "total": total, "capped": total > len(ids)}
+    return {"ids": ids, "total": total, "capped": total > len(ids), "sampled": False}
 
 
 # ---- Development question evaluation ----
