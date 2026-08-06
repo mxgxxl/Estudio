@@ -201,6 +201,12 @@ class Attempt(BaseModel):
     topic_ids: List[str] = []
     question_ids: List[str]
     answers: List[int]
+    # Snapshot por pregunta (ADITIVO, retrocompat: los intentos legacy no lo tienen).
+    # Cada item: {question_id, question_type, question, options (orden MOSTRADO),
+    # selected (índice en ese orden), correct_index (de la sesión), is_correct; y para
+    # dev: user_answer, dev_score, feedback}. Permite reconstruir el intento pregunta
+    # a pregunta pese al barajado de opciones (que no vive en question_ids/answers).
+    items: Optional[List[dict]] = None
     correct_count: int
     wrong_count: int = 0
     unanswered_count: int = 0
@@ -2243,6 +2249,43 @@ class QuizSubmitReq(BaseModel):
     # por el mismo ratio. Subordinado a la penalización (blindado en el backend).
     blanks_count_as_wrong: bool = False
     question_type: Optional[str] = None
+    # Snapshot por pregunta (orden mostrado/barajado de la sesión) para poder
+    # reconstruir el intento pregunta a pregunta. Opcional (cliente viejo → None).
+    snapshot: Optional[List[dict]] = None
+
+
+def _build_attempt_items(snapshot: List[dict], question_ids: List[str]) -> List[dict]:
+    """Normaliza el snapshot del cliente en los `items` del Attempt.
+
+    - Exige que los `question_id` del snapshot coincidan (mismo conjunto y orden)
+      con los `question_ids` del intento; si no, 400 (evita snapshots incoherentes).
+    - Recalcula `is_correct` en el backend para mcq/tf (no se fía del cliente).
+    - Para dev conserva user_answer/dev_score/feedback (solo display).
+    """
+    snap_ids = [s.get("question_id") for s in snapshot]
+    if snap_ids != question_ids:
+        raise HTTPException(status_code=400, detail="El snapshot no coincide con las preguntas del intento")
+    items: List[dict] = []
+    for s in snapshot:
+        qtype = s.get("question_type", "mcq")
+        item = {
+            "question_id": s.get("question_id"),
+            "question_type": qtype,
+            "question": s.get("question", ""),
+            "options": list(s.get("options", []) or []),
+            "selected": int(s.get("selected", -1)),
+            "correct_index": int(s.get("correct_index", -1)),
+        }
+        if qtype == "dev":
+            # Un dev es "acierto" con nota >= 5 (mismo umbral que el scoring).
+            item["is_correct"] = float(s.get("dev_score", 0)) >= 5
+            item["user_answer"] = s.get("user_answer", "")
+            item["dev_score"] = float(s.get("dev_score", 0))
+            item["feedback"] = s.get("feedback", "")
+        else:
+            item["is_correct"] = item["selected"] == item["correct_index"] and item["selected"] >= 0
+        items.append(item)
+    return items
 
 
 def _update_srs(q: dict, correct: bool) -> dict:
@@ -2345,14 +2388,22 @@ async def quiz_submit(req: QuizSubmitReq, current_user: dict = Depends(get_curre
     raw_score = round(raw, 3)
 
     today = datetime.now(timezone.utc).date().isoformat()
+    attempt_question_ids = [a.get("question_id") for a in req.answers]
+    # Snapshot por pregunta (opcional): valida contra los question_ids del intento y
+    # recalcula is_correct en el backend. Cliente viejo sin snapshot → items None.
+    attempt_items = (
+        _build_attempt_items(req.snapshot, attempt_question_ids)
+        if req.snapshot is not None else None
+    )
     attempt = Attempt(
         user_id=uid,
         selection=selection,
         behavior=behavior,
         subject_ids=req.subject_ids,
         topic_ids=req.topic_ids,
-        question_ids=[a.get("question_id") for a in req.answers],
+        question_ids=attempt_question_ids,
         answers=[int(a.get("selected", -1)) for a in req.answers],
+        items=attempt_items,
         correct_count=correct,
         wrong_count=wrong,
         unanswered_count=unanswered,
@@ -2446,6 +2497,80 @@ async def stats_overview(current_user: dict = Depends(get_current_user)):
         "streak": streak,
         "last_attempts": last_attempts,
     }
+
+
+@api.get("/attempts")
+async def list_attempts(
+    page: int = 1,
+    limit: int = 20,
+    behavior: Optional[str] = None,
+    selection: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Historial de intentos del usuario, paginado (created_at desc). Filas LIGERAS
+    (sin el snapshot `items`): lo justo para la lista, con nombres de asignatura/tema
+    resueltos en batch. `has_items` indica si el intento tiene desglose por pregunta."""
+    uid = current_user["id"]
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
+    query: dict = {"user_id": uid}
+    if behavior in ("practice", "exam"):
+        query["behavior"] = behavior
+    if selection in _QUIZ_SELECTIONS:
+        query["selection"] = selection
+
+    total = await db.attempts.count_documents(query)
+    rows = await (
+        db.attempts.find(query, {"_id": 0})
+        .sort([("created_at", -1)])
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+    # Resolver nombres de asignatura/tema en batch (sin N+1).
+    subj_ids = {sid for r in rows for sid in (r.get("subject_ids") or [])}
+    topic_ids = {tid for r in rows for tid in (r.get("topic_ids") or [])}
+    sname, tname = {}, {}
+    if subj_ids:
+        subs = await db.subjects.find({"user_id": uid, "id": {"$in": list(subj_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+        sname = {s["id"]: s["name"] for s in subs}
+    if topic_ids:
+        tps = await db.topics.find({"user_id": uid, "id": {"$in": list(topic_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(4000)
+        tname = {t["id"]: t["name"] for t in tps}
+
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"],
+            "created_at": r.get("created_at"),
+            "selection": r.get("selection", "all"),
+            "behavior": r.get("behavior", "practice"),
+            "score_10": r.get("score_10", 0.0),
+            "correct_count": r.get("correct_count", 0),
+            "wrong_count": r.get("wrong_count", 0),
+            "unanswered_count": r.get("unanswered_count", 0),
+            "total": r.get("total", 0),
+            "duration_seconds": r.get("duration_seconds", 0),
+            "penalty_factor": r.get("penalty_factor"),
+            "question_type": r.get("question_type"),
+            "subjects": [{"id": sid, "name": sname.get(sid)} for sid in (r.get("subject_ids") or []) if sid],
+            "topics": [{"id": tid, "name": tname.get(tid)} for tid in (r.get("topic_ids") or []) if tid],
+            "has_items": bool(r.get("items")),
+        })
+    return {"items": items, "total": total, "page": page, "limit": limit}
+
+
+@api.get("/attempts/{attempt_id}")
+async def get_attempt(attempt_id: str, current_user: dict = Depends(get_current_user)):
+    """Detalle de un intento (con `items` si los tiene). User-scoped: 404 si es de
+    otro usuario o no existe (no revela su existencia). Los intentos legacy sin
+    snapshot responden igualmente (sin desglose por pregunta)."""
+    uid = current_user["id"]
+    attempt = await db.attempts.find_one({"id": attempt_id, "user_id": uid}, {"_id": 0})
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Intento no encontrado")
+    return attempt
 
 
 def _group_stats_by(field: str):
