@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Check, X, MinusCircle, BookOpen, ChevronDown, ChevronUp, Pencil } from "lucide-react";
+import { Check, X, MinusCircle, Pencil } from "lucide-react";
 import { BEHAVIOR_LABELS, SELECTION_LABELS } from "@/lib/quizLabels";
 
 // Desglose reutilizable de un intento. Alimentado por `items` con el shape del
@@ -187,7 +186,6 @@ function ReviewCard({ item, index, blanksPenalized, onEditModel }) {
 }
 
 function DevBlock({ item, onEditModel }) {
-    const [showModel, setShowModel] = useState(false);
     const score = item.dev_score ?? 0;
     const passed = score >= 5;
     const missing = item.key_points_missing || [];
@@ -215,35 +213,25 @@ function DevBlock({ item, onEditModel }) {
                     </ul>
                 </div>
             )}
-            {(item.model_answer || onEditModel) && (
-                <div className="flex items-center gap-3">
-                    {item.model_answer && (
-                        <button
-                            onClick={() => setShowModel((o) => !o)}
-                            className="flex items-center gap-1 text-xs font-medium hover:underline"
-                            style={{ color: "var(--brand)" }}
-                        >
-                            <BookOpen className="w-3 h-3" />
-                            {showModel ? "Ocultar" : "Ver"} respuesta modelo
-                            {showModel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                        </button>
-                    )}
-                    {onEditModel && (
-                        <button
-                            onClick={() => onEditModel(item)}
-                            data-testid={`edit-model-${item.question_id}`}
-                            className="flex items-center gap-1 text-xs font-medium hover:underline"
-                            style={{ color: "var(--text-secondary)" }}
-                        >
-                            <Pencil className="w-3 h-3" /> Editar respuesta modelo
-                        </button>
-                    )}
+            {/* Respuesta modelo SIEMPRE visible (alineada con la práctica inline de
+                QuizRun); solo se pinta si viene (en el histórico no está → nada). */}
+            {item.model_answer && (
+                <div>
+                    <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>Respuesta modelo:</p>
+                    <div className="rounded-md p-3 text-sm leading-relaxed" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
+                        {item.model_answer}
+                    </div>
                 </div>
             )}
-            {showModel && item.model_answer && (
-                <div className="rounded-md p-3 text-sm leading-relaxed" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
-                    {item.model_answer}
-                </div>
+            {onEditModel && (
+                <button
+                    onClick={() => onEditModel(item)}
+                    data-testid={`edit-model-${item.question_id}`}
+                    className="flex items-center gap-1 text-xs font-medium hover:underline"
+                    style={{ color: "var(--text-secondary)" }}
+                >
+                    <Pencil className="w-3 h-3" /> Editar respuesta modelo
+                </button>
             )}
             {item.explanation && (
                 <div className="text-xs italic" style={{ color: "var(--text-muted)" }}>Puntos clave: {item.explanation}</div>
