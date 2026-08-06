@@ -1,4 +1,5 @@
-import { BookOpenCheck, Loader2, RefreshCw, Download, FileText, Printer } from "lucide-react";
+import { useState } from "react";
+import { BookOpenCheck, Loader2, RefreshCw, Download, FileText, FileDown } from "lucide-react";
 import { toast } from "sonner";
 import {
     DropdownMenu,
@@ -6,23 +7,31 @@ import {
     DropdownMenuContent,
     DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
-import { summaryToMarkdown, downloadMarkdown, printSummaryAsPdf } from "@/lib/summaryExport";
+import { summaryToMarkdown, downloadMarkdown, exportSummaryAsPdf } from "@/lib/summaryExport";
 
 // Render del resumen de IA (mismo aspecto que el panel histórico de TopicDetail).
 // `summary` es el JSON estructurado de Gemini (overview/sections/remember).
 // Cabecera con "Exportar" (Markdown/PDF, 100% cliente), "Regenerar" y "Cerrar".
 export default function SummaryPanel({ summary, onRegenerate, regenerating = false, onClose, pdfFilename = "resumen" }) {
+    const [exportingPdf, setExportingPdf] = useState(false);
+
     if (!summary) return null;
 
     const onDownloadMd = () => {
         downloadMarkdown(summaryToMarkdown(summary, pdfFilename), pdfFilename);
         toast.success("Resumen descargado");
     };
-    const onExportPdf = () => {
+    // jsPDF se carga de forma diferida (import dinámico) → puede tardar un instante
+    // la primera vez; mantenemos el menú abierto con un spinner mientras genera.
+    const onExportPdf = async () => {
+        if (exportingPdf) return;
+        setExportingPdf(true);
         try {
-            printSummaryAsPdf(summary, pdfFilename);
+            await exportSummaryAsPdf(summary, pdfFilename);
         } catch {
-            toast.error("Permite las ventanas emergentes para exportar a PDF");
+            toast.error("Permite las ventanas emergentes para ver el PDF");
+        } finally {
+            setExportingPdf(false);
         }
     };
     return (
@@ -46,8 +55,14 @@ export default function SummaryPanel({ summary, onRegenerate, regenerating = fal
                             <DropdownMenuItem onClick={onDownloadMd} data-testid="summary-export-md" className="gap-2 cursor-pointer">
                                 <FileText className="w-4 h-4" /> Descargar Markdown (.md)
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={onExportPdf} data-testid="summary-export-pdf" className="gap-2 cursor-pointer">
-                                <Printer className="w-4 h-4" /> Imprimir / Guardar PDF
+                            <DropdownMenuItem
+                                onSelect={(e) => { e.preventDefault(); onExportPdf(); }}
+                                disabled={exportingPdf}
+                                data-testid="summary-export-pdf"
+                                className="gap-2 cursor-pointer"
+                            >
+                                {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                                Exportar a PDF
                             </DropdownMenuItem>
                         </DropdownMenuContent>
                     </DropdownMenu>

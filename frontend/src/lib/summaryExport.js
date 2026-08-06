@@ -167,42 +167,111 @@ export function downloadMarkdown(md, filename) {
     return true;
 }
 
-// Abre una ventana aislada con el resumen maquetado y lanza el diálogo de impresión
-// (el usuario elige "Guardar como PDF"). Lanza Error("popup-blocked") si está bloqueada.
-export function printSummaryAsPdf(content, filename) {
-    // SIN "noopener": ese flag hace que window.open devuelva null SIEMPRE (spec
-    // HTML) y perderíamos el handle para escribir/imprimir. Necesitamos el handle;
-    // el guard de abajo queda para bloqueos REALES de popup.
-    const win = window.open("", "_blank");
-    if (!win) throw new Error("popup-blocked");
-
+// Genera un PDF REAL (texto seleccionable/buscable) con jsPDF y lo abre en el visor
+// nativo del navegador (ver + descargar). jsPDF se carga de forma DIFERIDA (import
+// dinámico) para no engordar el bundle inicial. Lanza Error("popup-blocked") si el
+// navegador bloquea la pestaña del visor. Async.
+export async function exportSummaryAsPdf(content, filename) {
+    const { jsPDF } = await import("jspdf");
     const title = sanitizeFilename(filename);
-    const body = summaryToHtml(content, filename);
-    // El disparo de print() va INYECTADO en el HTML (window.onload interno): es la
-    // vía fiable para documentos escritos con document.write, sin depender de
-    // onload/readyState desde fuera. La ventana queda abierta para "Guardar como PDF".
-    const html = `<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8" />
-<title>${esc(title)}</title>
-<style>
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; font-size: 12pt; color: #23211f; }
-  h1 { font-size: 20pt; margin-bottom: 1rem; }
-  h2 { font-size: 15pt; margin-top: 1.5rem; margin-bottom: 0.5rem; }
-  ul { padding-left: 1.5rem; }
-  li { margin-bottom: 0.25rem; }
-  strong { font-weight: 600; }
-  section { break-inside: avoid; }
-  @media print { body { margin: 0; } }
-</style>
-</head>
-<body>
-${body}
-<script>window.onload = function () { window.focus(); window.print(); };</script>
-</body>
-</html>`;
-    win.document.write(html);
-    win.document.close();
+    const { obj, raw } = normalizeContent(content);
+
+    // Unidad en puntos (pt) para trabajar con tamaños tipográficos directos.
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    // helvetica (fuente estándar) cubre acentos y ñ vía Latin-1; se evitan emojis
+    // (las fuentes estándar de jsPDF no los renderizan → "Recuerda" sin 💡).
+    const margin = 48;
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const maxW = pageW - margin * 2;
+    const BULLET_INDENT = 14;
+    let y = margin;
+
+    // Salto de página si la siguiente línea no cabe.
+    const ensure = (h) => {
+        if (y + h > pageH - margin) { doc.addPage(); y = margin; }
+    };
+    // Bloque de texto con wrap (doc.splitTextToSize). `indent` en pt; `gap` tras el bloque.
+    const block = (text, { size = 11, style = "normal", indent = 0, gap = 6 } = {}) => {
+        if (text == null || String(text).trim() === "") return;
+        doc.setFont("helvetica", style);
+        doc.setFontSize(size);
+        doc.setTextColor(35, 33, 31);
+        const lh = size * 1.35;
+        for (const ln of doc.splitTextToSize(String(text).trim(), maxW - indent)) {
+            ensure(lh);
+            doc.text(ln, margin + indent, y);
+            y += lh;
+        }
+        y += gap;
+    };
+    // Bullet con sangría colgante: el "•" solo en la primera línea, el texto envuelto.
+    const bullet = (text, { size = 11, style = "normal", gap = 4 } = {}) => {
+        if (text == null || String(text).trim() === "") return;
+        doc.setFont("helvetica", style);
+        doc.setFontSize(size);
+        doc.setTextColor(35, 33, 31);
+        const lh = size * 1.35;
+        const lines = doc.splitTextToSize(String(text).trim(), maxW - BULLET_INDENT);
+        lines.forEach((ln, i) => {
+            ensure(lh);
+            if (i === 0) doc.text("•", margin, y);
+            doc.text(ln, margin + BULLET_INDENT, y);
+            y += lh;
+        });
+        y += gap;
+    };
+
+    // Título (nombre del PDF sanitizado).
+    block(title, { size: 19, style: "bold", gap: 12 });
+
+    if (!obj) {
+        block(raw && raw.trim() ? raw : "(Resumen no disponible)", { size: 11 });
+    } else {
+        if (typeof obj.overview === "string" && obj.overview.trim()) {
+            block(obj.overview, { size: 11, gap: 12 });
+        }
+
+        const concepts = (Array.isArray(obj.key_concepts) ? obj.key_concepts : [])
+            .filter((c) => c && (c.concept || c.explanation));
+        if (concepts.length) {
+            block("Conceptos clave", { size: 14, style: "bold", gap: 6 });
+            for (const c of concepts) {
+                bullet((c.concept || "").trim(), { size: 11, style: "bold", gap: 2 });
+                const exp = (c.explanation || "").trim();
+                if (exp) block(exp, { size: 11, indent: BULLET_INDENT, gap: 6 });
+            }
+        }
+
+        for (const s of Array.isArray(obj.sections) ? obj.sections : []) {
+            if (!s) continue;
+            const stitle = (s.title || "").trim();
+            const points = (Array.isArray(s.points) ? s.points : []).filter((p) => p != null && String(p).trim());
+            if (!stitle && !points.length) continue;
+            block(stitle || "Sección", { size: 14, style: "bold", gap: 6 });
+            for (const p of points) bullet(String(p).trim(), { size: 11 });
+            y += 4;
+        }
+
+        const remember = (Array.isArray(obj.remember) ? obj.remember : []).filter((r) => r != null && String(r).trim());
+        if (remember.length) {
+            block("Recuerda", { size: 14, style: "bold", gap: 6 });
+            for (const r of remember) bullet(String(r).trim(), { size: 11 });
+        }
+    }
+
+    doc.setProperties({ title });
+
+    // Blob → visor nativo en pestaña nueva (SIN noopener: necesitamos el handle para
+    // detectar el bloqueo real de popup). No revocamos el URL de inmediato (el visor
+    // lo necesita para cargar); limpieza diferida generosa.
+    const blob = doc.output("blob");
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    if (!win) {
+        URL.revokeObjectURL(url);
+        throw new Error("popup-blocked");
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     return true;
 }
