@@ -320,6 +320,25 @@ export default function QuizRun() {
                 penalty_factor: quiz.penalty_factor || null,
                 blanks_count_as_wrong: !!quiz.blanks_count_as_wrong,
                 question_type: quiz.question_type || null,
+                // Snapshot por pregunta (orden mostrado/barajado de la sesión) para
+                // reconstruir el intento después. Mismo orden que `answers`. El backend
+                // recalcula is_correct; aquí solo mandamos lo mostrado + respuesta dev.
+                snapshot: quiz.questions.map((qq, i) => {
+                    const item = {
+                        question_id: qq.id,
+                        question_type: qq.question_type,
+                        question: qq.question,
+                        options: qq.options || [],
+                        selected: answers[i] ?? -1,
+                        correct_index: qq.correct_index,
+                    };
+                    if (qq.question_type === "dev") {
+                        item.user_answer = devAnswers[qq.id] || "";
+                        item.dev_score = scores[qq.id] ?? 0;
+                        item.feedback = devResults[qq.id]?.feedback || "";
+                    }
+                    return item;
+                }),
             };
             const res = await quizSubmit(payload);
             sessionStorage.setItem("quiz_result", JSON.stringify({
