@@ -1,76 +1,10 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, BookOpen, ChevronDown, ChevronUp, Loader2, Pencil } from "lucide-react";
+import { Check, X, RotateCcw, Home, Sparkles, MinusCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { quizStart } from "@/lib/api";
 import EditQuestionDialog from "@/components/EditQuestionDialog";
-
-function DevReviewCard({ question, devScore, devResult, onEditModel }) {
-    const [showModel, setShowModel] = useState(false);
-    const score = devScore ?? 0;
-    const passed = score >= 5;
-    const feedback = devResult?.feedback;
-    const missing = devResult?.key_points_missing || [];
-
-    return (
-        <div className="space-y-2">
-            <div
-                className="flex items-center justify-between px-3 py-2 rounded-md"
-                style={{ background: passed ? "#eef2ec" : "#fbeeee" }}
-            >
-                <span className="text-sm font-medium" style={{ color: passed ? "var(--sage)" : "var(--error)" }}>
-                    Puntuación obtenida
-                </span>
-                <span className="font-display font-bold text-xl" style={{ color: passed ? "var(--sage)" : "var(--error)" }}>
-                    {score}/10
-                </span>
-            </div>
-            {feedback && (
-                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{feedback}</p>
-            )}
-            {missing.length > 0 && (
-                <div>
-                    <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>Puntos que faltaron:</p>
-                    <ul className="list-disc list-inside text-xs space-y-0.5" style={{ color: "var(--text-secondary)" }}>
-                        {missing.map((p, i) => <li key={i}>{p}</li>)}
-                    </ul>
-                </div>
-            )}
-            <div className="flex items-center gap-3">
-                <button
-                    onClick={() => setShowModel(o => !o)}
-                    className="flex items-center gap-1 text-xs font-medium hover:underline"
-                    style={{ color: "var(--brand)" }}
-                >
-                    <BookOpen className="w-3 h-3" />
-                    {showModel ? "Ocultar" : "Ver"} respuesta modelo
-                    {showModel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                </button>
-                <button
-                    onClick={() => onEditModel?.(question)}
-                    data-testid={`edit-model-${question.id}`}
-                    className="flex items-center gap-1 text-xs font-medium hover:underline"
-                    style={{ color: "var(--text-secondary)" }}
-                >
-                    <Pencil className="w-3 h-3" /> Editar respuesta modelo
-                </button>
-            </div>
-            {showModel && question.model_answer && (
-                <div
-                    className="rounded-md p-3 text-sm leading-relaxed"
-                    style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
-                >
-                    {question.model_answer}
-                </div>
-            )}
-            {question.explanation && (
-                <div className="text-xs italic" style={{ color: "var(--text-muted)" }}>
-                    Puntos clave: {question.explanation}
-                </div>
-            )}
-        </div>
-    );
-}
+import AttemptReview from "@/components/AttemptReview";
 
 export default function QuizResults() {
     const navigate = useNavigate();
@@ -170,6 +104,30 @@ export default function QuizResults() {
     // Separate questions by type for the summary
     const devQuestions = questions.filter(q => q.question_type === "dev");
     const hasDevQuestions = devQuestions.length > 0;
+
+    // Desglose por pregunta en el MISMO shape que el snapshot del backend
+    // (Attempt.items), para reutilizar AttemptReview. Los extras del post-quiz
+    // (model_answer, feedback, key_points_missing) viajan como campos opcionales.
+    const reviewItems = questions.map((q, i) => {
+        const base = {
+            question_id: q.id,
+            question_type: q.question_type,
+            question: q.question,
+            topic_name: q.topic_name,
+            options: q.options || [],
+            selected: answers[i] ?? -1,
+            correct_index: q.correct_index,
+            explanation: q.explanation || "",
+        };
+        if (q.question_type !== "dev") return base;
+        return {
+            ...base,
+            dev_score: devScores[q.id] ?? 0,
+            feedback: devResults[q.id]?.feedback || "",
+            key_points_missing: devResults[q.id]?.key_points_missing || [],
+            model_answer: q.model_answer || "",
+        };
+    });
 
     return (
         <div className="max-w-3xl mx-auto px-5 md:px-8 py-8 md:py-12">
@@ -272,94 +230,14 @@ export default function QuizResults() {
                 </Link>
             </div>
 
-            {/* Review per question */}
-            <span className="label-eyebrow block mb-3">Revisión pregunta a pregunta</span>
-            <div className="space-y-3">
-                {questions.map((q, i) => {
-                    const sel = answers[i];
-                    const isDevQ = q.question_type === "dev";
-                    const devScore = devScores[q.id];
-                    const devResult = devResults[q.id];
-                    // Con "blancos restan" el blanco se pinta como error (no como
-                    // "sin responder"), coherente con que penalizó como un fallo.
-                    const isUnanswered = !isDevQ && sel === -1 && !blanksPenalized;
-                    const ok = isDevQ
-                        ? (devScore ?? 0) >= 5
-                        : sel === q.correct_index && !isUnanswered;
-
-                    return (
-                        <div key={q.id} className="card-organic p-4 md:p-5 fade-up" data-testid={`review-q-${i}`}>
-                            <div className="flex items-start gap-3">
-                                <span
-                                    className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 mt-0.5"
-                                    style={{
-                                        background: isUnanswered
-                                            ? "var(--bg-secondary)"
-                                            : ok ? "#eef2ec" : "#fbeeee",
-                                    }}
-                                >
-                                    {isUnanswered ? (
-                                        <MinusCircle className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
-                                    ) : ok ? (
-                                        <Check className="w-4 h-4" style={{ color: "var(--sage)" }} />
-                                    ) : (
-                                        <X className="w-4 h-4" style={{ color: "var(--error)" }} />
-                                    )}
-                                </span>
-                                <div className="flex-1">
-                                    <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
-                                        {q.topic_name} · Pregunta {i + 1} ·{" "}
-                                        {isDevQ ? "Desarrollo" : q.question_type === "tf" ? "V/F" : "Test"}
-                                        {!isDevQ && sel === -1 && blanksPenalized && (
-                                            <span style={{ color: "var(--error)" }}> · En blanco (penaliza)</span>
-                                        )}
-                                    </div>
-                                    <div className="font-display font-bold text-base md:text-lg leading-snug mb-3">
-                                        {q.question}
-                                    </div>
-
-                                    {/* Development question review */}
-                                    {isDevQ ? (
-                                        <DevReviewCard question={q} devScore={devScore} devResult={devResult} onEditModel={setEditingModel} />
-                                    ) : (
-                                        <>
-                                            <ul className="space-y-1 text-sm">
-                                                {q.options.map((opt, oi) => {
-                                                    const isCorrect = oi === q.correct_index;
-                                                    const isSelected = oi === sel;
-                                                    return (
-                                                        <li
-                                                            key={oi}
-                                                            className="flex items-start gap-2 px-2 py-1 rounded"
-                                                            style={{
-                                                                background: isCorrect ? "#eef2ec" : isSelected ? "#fbeeee" : "transparent",
-                                                                color: isCorrect ? "var(--sage)" : isSelected ? "var(--error)" : "var(--text-secondary)",
-                                                            }}
-                                                        >
-                                                            <span className="kbd" style={{ background: "white" }}>
-                                                                {q.question_type === "tf"
-                                                                    ? oi === 0 ? "V" : "F"
-                                                                    : String.fromCharCode(65 + oi)}
-                                                            </span>
-                                                            <span className="flex-1">{opt}</span>
-                                                            {isCorrect && <Check className="w-3.5 h-3.5 shrink-0 mt-0.5" style={{ color: "var(--sage)" }} />}
-                                                        </li>
-                                                    );
-                                                })}
-                                            </ul>
-                                            {q.explanation && (
-                                                <div className="mt-2 text-xs italic" style={{ color: "var(--text-muted)" }}>
-                                                    {q.explanation}
-                                                </div>
-                                            )}
-                                        </>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
+            {/* Revisión pregunta a pregunta (componente reutilizable; las tarjetas de
+                nota/acciones de arriba son propias de esta pantalla → showTiles=false). */}
+            <AttemptReview
+                items={reviewItems}
+                showTiles={false}
+                blanksPenalized={blanksPenalized}
+                onEditModel={(item) => setEditingModel(questions.find((q) => q.id === item.question_id))}
+            />
 
             <EditQuestionDialog
                 question={editingModel}

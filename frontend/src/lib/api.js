@@ -151,6 +151,15 @@ export const deleteQuestion = (qid) => api.delete(`/questions/${qid}`).then((r) 
 // Quiz
 export const quizStart = (payload) => api.post("/quiz/start", payload).then((r) => r.data);
 export const quizSubmit = (payload) => api.post("/quiz/submit", payload).then((r) => r.data);
+
+// Historial de intentos (Fase A backend). Listado paginado + detalle.
+export const listAttempts = ({ page = 1, limit = 20, behavior, selection } = {}) => {
+    const params = { page, limit };
+    if (behavior) params.behavior = behavior;
+    if (selection) params.selection = selection;
+    return api.get("/attempts", { params }).then((r) => r.data);
+};
+export const getAttempt = (id) => api.get(`/attempts/${id}`).then((r) => r.data);
 // Conteo de preguntas de una selección + filtros (gating de QuizSetup, coste 0).
 // Construye params repetidos (topic_ids=a&topic_ids=b) para que FastAPI los ligue.
 export const quizAvailable = ({ selection = "all", subject_ids = [], topic_ids = [], question_type = "any", pdf_ids = [] } = {}) => {
