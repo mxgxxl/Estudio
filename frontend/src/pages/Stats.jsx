@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
     BarChart3, BookOpen, Target, Clock, Star, Flame,
-    Brain, FolderOpen, AlertTriangle, Zap, Loader2, RotateCcw,
+    Brain, FolderOpen, AlertTriangle, Zap, Loader2, RotateCcw, Eye,
 } from "lucide-react";
-import { getStats, getStatsBySubject, getStatsByTopic, getKnowledgeGaps } from "@/lib/api";
-import { attemptLabel } from "@/lib/quizLabels";
+import { getStats, getStatsBySubject, getStatsByTopic, getKnowledgeGaps, listAttempts } from "@/lib/api";
+import { BEHAVIOR_LABELS, SELECTION_LABELS } from "@/lib/quizLabels";
 
 const FETCHERS = {
     overview: getStats,
@@ -238,35 +238,147 @@ export default function Stats() {
                 </Link>
             </section>
 
-            {/* Last attempts (parte del overview) */}
-            {!overview.loading && !overview.error && o.last_attempts?.length > 0 && (
-                <section>
-                    <span className="label-eyebrow block mb-3">Últimos 3 intentos</span>
+            {/* Historial de intentos (paginado, con filtros, enlaza al detalle) */}
+            <AttemptHistory />
+        </div>
+    );
+}
+
+const BEHAVIOR_FILTERS = [
+    { id: "", label: "Todos" },
+    { id: "practice", label: "Práctica" },
+    { id: "exam", label: "Examen" },
+];
+const SELECTION_FILTERS = [
+    { id: "", label: "Todas las selecciones" },
+    { id: "all", label: "Todas" },
+    { id: "errors", label: "Errores" },
+    { id: "srs", label: "Repaso" },
+    { id: "favorites", label: "Favoritas" },
+];
+const HISTORY_LIMIT = 15;
+
+function AttemptHistory() {
+    const navigate = useNavigate();
+    const [attempts, setAttempts] = useState([]);
+    const [total, setTotal] = useState(0);
+    const [page, setPage] = useState(1);
+    const [behavior, setBehavior] = useState("");
+    const [selection, setSelection] = useState("");
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(false);
+
+    const load = useCallback((pageToLoad) => {
+        setLoading(true);
+        setError(false);
+        return listAttempts({ page: pageToLoad, limit: HISTORY_LIMIT, behavior: behavior || undefined, selection: selection || undefined })
+            .then((res) => {
+                setTotal(res.total);
+                // page 1 reemplaza; páginas siguientes concatenan ("cargar más").
+                setAttempts((prev) => (pageToLoad === 1 ? res.items : [...prev, ...res.items]));
+            })
+            .catch(() => setError(true))
+            .finally(() => setLoading(false));
+    }, [behavior, selection]);
+
+    // Al cambiar un filtro, vuelve a la página 1.
+    useEffect(() => { setPage(1); load(1); }, [load]);
+
+    const loadMore = () => {
+        const next = page + 1;
+        setPage(next);
+        load(next);
+    };
+
+    const hasMore = attempts.length < total;
+
+    return (
+        <section>
+            <span className="label-eyebrow block mb-3">Historial de intentos</span>
+
+            {/* Filtros */}
+            <div className="flex flex-wrap gap-2 mb-4">
+                <select
+                    value={behavior}
+                    onChange={(e) => setBehavior(e.target.value)}
+                    data-testid="history-behavior"
+                    className="px-3 py-2 rounded-md border text-sm bg-white"
+                    style={{ borderColor: "var(--border)" }}
+                >
+                    {BEHAVIOR_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                </select>
+                <select
+                    value={selection}
+                    onChange={(e) => setSelection(e.target.value)}
+                    data-testid="history-selection"
+                    className="px-3 py-2 rounded-md border text-sm bg-white"
+                    style={{ borderColor: "var(--border)" }}
+                >
+                    {SELECTION_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                </select>
+            </div>
+
+            {error ? (
+                <SectionError onRetry={() => load(page)} />
+            ) : attempts.length === 0 && loading ? (
+                <SectionLoading />
+            ) : attempts.length === 0 ? (
+                <div className="card-organic p-8 text-center text-sm" style={{ color: "var(--text-muted)" }} data-testid="history-empty">
+                    Aún no has hecho ningún intento.
+                </div>
+            ) : (
+                <>
                     <div className="card-organic divide-y" style={{ borderColor: "var(--border)" }}>
-                        {o.last_attempts.map(a => (
-                            <div key={a.id} className="flex items-center justify-between p-4">
-                                <div>
-                                    <div className="font-medium text-sm">{attemptLabel(a)}{a.penalty_factor && (
-                                        <span className="text-xs font-mono ml-1" style={{ color: "var(--text-muted)" }}>· −1/{a.penalty_factor}</span>
-                                    )}</div>
-                                    <div className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>
+                        {attempts.map((a) => (
+                            <button
+                                key={a.id}
+                                onClick={() => navigate(`/stats/intentos/${a.id}`)}
+                                data-testid={`history-row-${a.id}`}
+                                className="w-full flex items-center justify-between p-4 text-left hover:bg-[color:var(--bg-secondary)]"
+                            >
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="px-2 py-0.5 rounded-md text-xs font-medium" style={{ background: "#fdf1ea", color: "var(--brand)" }}>
+                                            {BEHAVIOR_LABELS[a.behavior] || "Práctica"}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded-md text-xs font-medium" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
+                                            {SELECTION_LABELS[a.selection] || "Todas"}
+                                        </span>
+                                        {a.penalty_factor && (
+                                            <span className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>−1/{a.penalty_factor}</span>
+                                        )}
+                                        {a.has_items && <Eye className="w-3.5 h-3.5" style={{ color: "var(--text-muted)" }} title="Tiene desglose por pregunta" />}
+                                    </div>
+                                    <div className="text-xs font-mono mt-1" style={{ color: "var(--text-muted)" }}>
                                         {new Date(a.created_at).toLocaleString("es-ES")}
+                                        {a.duration_seconds > 0 && ` · ${Math.round(a.duration_seconds / 60) || 1} min`}
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-3">
-                                    <span className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>
-                                        {a.correct_count}/{a.total}
-                                    </span>
-                                    <span className="font-display font-bold text-lg"
-                                        style={{ color: a.score_10 >= 5 ? "var(--sage)" : "var(--error)" }}>
+                                <div className="flex items-center gap-3 shrink-0">
+                                    <span className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>{a.correct_count}/{a.total}</span>
+                                    <span className="font-display font-bold text-lg" style={{ color: a.score_10 >= 5 ? "var(--sage)" : "var(--error)" }}>
                                         {a.score_10}
                                     </span>
                                 </div>
-                            </div>
+                            </button>
                         ))}
                     </div>
-                </section>
+                    {hasMore && (
+                        <div className="flex justify-center mt-4">
+                            <button
+                                onClick={loadMore}
+                                disabled={loading}
+                                data-testid="history-load-more"
+                                className="px-4 py-2 rounded-md border text-sm font-medium flex items-center gap-2 hover:bg-[color:var(--bg-secondary)] disabled:opacity-50"
+                                style={{ borderColor: "var(--border)" }}
+                            >
+                                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                                Cargar más ({attempts.length} de {total})
+                            </button>
+                        </div>
+                    )}
+                </>
             )}
-        </div>
+        </section>
     );
 }
