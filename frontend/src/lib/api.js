@@ -127,12 +127,15 @@ export const listQuestions = (filters = {}) => {
     );
     return api.get("/questions", { params }).then((r) => r.data);
 };
-// Mismos filtros; devuelve { ids, total, capped } para "practicar esta selección"
+// Mismos filtros; devuelve { ids, total, capped, sampled } para "practicar esta
+// selección". Con `randomSample` (int) pide una muestra ALEATORIA uniforme de ese
+// tamaño ($sample en backend) en vez de los más recientes.
 export const listQuestionIds = (filters = {}) => {
-    const { sort, page, limit, ...rest } = filters; // /ids ignora paginación/orden
+    const { sort, page, limit, randomSample, ...rest } = filters; // /ids ignora paginación/orden
     const params = Object.fromEntries(
         Object.entries(rest).filter(([, v]) => v !== undefined && v !== null && v !== "")
     );
+    if (randomSample != null) params.random_sample = randomSample;
     return api.get("/questions/ids", { params }).then((r) => r.data);
 };
 

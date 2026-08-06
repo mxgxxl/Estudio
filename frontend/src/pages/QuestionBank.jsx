@@ -2,13 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
     Search, Star, Flag, Trash2, Check, Sparkles, Loader2, ChevronLeft,
-    ChevronRight, ExternalLink, Pencil, ListChecks, Plus,
+    ChevronRight, ExternalLink, Pencil, ListChecks, Plus, Shuffle, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
     listQuestions, listQuestionIds, listSubjects, listTopics, listPdfs,
     toggleFavorite as apiFav, toggleDifficult as apiDiff, deleteQuestion, quizStart,
 } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import EditQuestionDialog from "@/components/EditQuestionDialog";
 import CreateQuestionDialog from "@/components/CreateQuestionDialog";
 import CreateTopicStepper from "@/components/CreateTopicStepper";
@@ -32,6 +34,8 @@ const TYPES = [
     { id: "dev", label: "Desarrollo" },
 ];
 const LIMIT = 30;
+// Tope de preguntas por sesión de práctica (espejo de QUESTIONS_IDS_CAP del backend).
+const SESSION_CAP = 500;
 
 export default function QuestionBank() {
     const navigate = useNavigate();
@@ -60,6 +64,12 @@ export default function QuestionBank() {
     const [editing, setEditing] = useState(null);
     const [createOpen, setCreateOpen] = useState(false);
     const [topicStepperOpen, setTopicStepperOpen] = useState(false);
+
+    // Selección granular para practicar.
+    const [selectedIds, setSelectedIds] = useState(() => new Set()); // marcadas por checkbox
+    const [selectAllFiltered, setSelectAllFiltered] = useState(false); // "todas las que coinciden"
+    const [randomMode, setRandomMode] = useState(null);   // null | "count" | "percent"
+    const [randomValue, setRandomValue] = useState(10);
 
     // Catálogos de filtros (asignaturas/temas/PDFs). Reutilizado tras crear un
     // tema nuevo para que aparezca de inmediato como opción del desplegable.
@@ -98,6 +108,12 @@ export default function QuestionBank() {
 
     // Al cambiar cualquier filtro, vuelve a la página 1.
     useEffect(() => { setPage(1); }, [filters]);
+
+    // Cambiar un FILTRO (o el orden) invalida la selección acumulada; paginar NO.
+    useEffect(() => {
+        setSelectedIds(new Set());
+        setSelectAllFiltered(false);
+    }, [filters, sort]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -166,43 +182,85 @@ export default function QuestionBank() {
         }
     };
 
+    // Arranca un quiz de práctica con un conjunto EXACTO de ids (reusado por los
+    // tres modos: selección explícita, todas las filtradas y aleatorio).
+    const launchQuiz = async (ids) => {
+        const res = await quizStart({
+            behavior: "practice",
+            selection: "all",
+            question_ids: ids,
+            num_questions: ids.length,
+            question_type: qType || "any",
+        });
+        const questions = res.questions || [];
+        if (!questions.length) {
+            toast.error("No hay preguntas disponibles");
+            return;
+        }
+        sessionStorage.setItem("current_quiz", JSON.stringify({
+            questions,
+            behavior: "practice",
+            selection: "all",
+            subject_ids: [],
+            topic_ids: [],
+            time_limit_seconds: null,
+            penalty_factor: null,
+            question_type: qType || "any",
+            started_at: Date.now(),
+        }));
+        navigate("/quiz/run");
+    };
+
+    // Practicar según el modo activo:
+    // - selectAllFiltered → /questions/ids con filtros (respeta CAP + aviso capped).
+    // - selección explícita → esos ids exactos (sin llamar a /ids).
+    // - nada marcado → comportamiento actual (todas las filtradas vía /ids).
     const practiceSelection = async () => {
         setPracticing(true);
         try {
-            const { ids, total, capped } = await listQuestionIds(filters);
+            let ids;
+            if (!selectAllFiltered && selectedIds.size > 0) {
+                if (selectedIds.size > SESSION_CAP) {
+                    toast.error(`Máximo ${SESSION_CAP} por sesión. Tienes ${selectedIds.size} seleccionadas.`);
+                    return;
+                }
+                ids = [...selectedIds];
+            } else {
+                const res = await listQuestionIds(filters);
+                ids = res.ids;
+                if (res.capped) {
+                    toast(`Practicando ${ids.length} de ${res.total} preguntas`, {
+                        description: "Es el máximo por sesión. Afina los filtros para incluir el resto.",
+                    });
+                }
+            }
             if (!ids.length) {
                 toast.error("No hay preguntas para practicar con estos filtros");
                 return;
             }
-            if (capped) {
-                toast(`Practicando ${ids.length} de ${total} preguntas`, {
-                    description: "Es el máximo por sesión. Afina los filtros para incluir el resto.",
-                });
-            }
-            const res = await quizStart({
-                behavior: "practice",
-                selection: "all",
-                question_ids: ids,
-                num_questions: ids.length,
-                question_type: qType || "any",
-            });
-            const questions = res.questions || [];
-            if (!questions.length) {
-                toast.error("No hay preguntas disponibles");
+            await launchQuiz(ids);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "No se pudo iniciar la práctica");
+        } finally {
+            setPracticing(false);
+        }
+    };
+
+    // Practicar una muestra ALEATORIA (cantidad o %) sobre los filtros activos.
+    const practiceRandom = async () => {
+        if (!randomMode) return;
+        const n = randomMode === "percent"
+            ? Math.ceil((total * randomValue) / 100)
+            : randomValue;
+        const size = Math.max(1, Math.min(n, SESSION_CAP));
+        setPracticing(true);
+        try {
+            const { ids } = await listQuestionIds({ ...filters, randomSample: size });
+            if (!ids.length) {
+                toast.error("No hay preguntas para practicar con estos filtros");
                 return;
             }
-            sessionStorage.setItem("current_quiz", JSON.stringify({
-                questions,
-                behavior: "practice",
-                selection: "all",
-                subject_ids: [],
-                topic_ids: [],
-                time_limit_seconds: null,
-                penalty_factor: null,
-                question_type: qType || "any",
-                started_at: Date.now(),
-            }));
-            navigate("/quiz/run");
+            await launchQuiz(ids);
         } catch (err) {
             toast.error(err?.response?.data?.detail || "No se pudo iniciar la práctica");
         } finally {
@@ -216,6 +274,38 @@ export default function QuestionBank() {
 
     const selectCls = "px-3 py-2 rounded-md border text-sm bg-white";
     const selectStyle = { borderColor: "var(--border)" };
+
+    // Selección: marcar/desmarcar una pregunta o toda la página.
+    const toggleSelect = (id) => {
+        setSelectAllFiltered(false);
+        setSelectedIds((prev) => {
+            const next = new Set(prev);
+            next.has(id) ? next.delete(id) : next.add(id);
+            return next;
+        });
+    };
+    const pageIds = items.map((q) => q.id);
+    const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+    const somePageSelected = pageIds.some((id) => selectedIds.has(id));
+    const headerCheck = allPageSelected ? true : somePageSelected ? "indeterminate" : false;
+    const toggleSelectPage = () => {
+        setSelectAllFiltered(false);
+        setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (allPageSelected) pageIds.forEach((id) => next.delete(id));
+            else pageIds.forEach((id) => next.add(id));
+            return next;
+        });
+    };
+    const clearSelection = () => {
+        setSelectedIds(new Set());
+        setSelectAllFiltered(false);
+    };
+    // Enlace "seleccionar todas las que coinciden": solo si la página entera está
+    // marcada y hay más preguntas fuera de la página.
+    const canSelectAllFiltered =
+        !selectAllFiltered && allPageSelected && selectedIds.size === items.length && total > items.length;
+    const hasSelection = selectAllFiltered || selectedIds.size > 0;
 
     return (
         <div>
@@ -313,6 +403,94 @@ export default function QuestionBank() {
                 ))}
             </div>
 
+            {/* Práctica aleatoria: N preguntas o X% sobre los filtros activos */}
+            <div className="card-organic p-3 mb-4 flex flex-wrap items-center gap-2" data-testid="qbank-random-panel">
+                <span className="text-xs font-medium flex items-center gap-1.5" style={{ color: "var(--text-secondary)" }}>
+                    <Shuffle className="w-3.5 h-3.5" style={{ color: "var(--brand)" }} /> Práctica aleatoria
+                </span>
+                <div className="flex rounded-md border overflow-hidden" style={{ borderColor: "var(--border)" }}>
+                    {[{ id: "count", label: "Cantidad" }, { id: "percent", label: "Porcentaje" }].map((m) => (
+                        <button
+                            key={m.id}
+                            onClick={() => setRandomMode(m.id)}
+                            data-testid={`qbank-random-mode-${m.id}`}
+                            className="px-2.5 py-1 text-xs font-medium"
+                            style={{
+                                background: randomMode === m.id ? "var(--brand)" : "white",
+                                color: randomMode === m.id ? "white" : "var(--text-secondary)",
+                            }}
+                        >
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
+                <Input
+                    type="number"
+                    min={1}
+                    max={randomMode === "percent" ? 100 : SESSION_CAP}
+                    value={randomValue}
+                    onChange={(e) => setRandomValue(Math.max(1, parseInt(e.target.value || "1", 10)))}
+                    disabled={!randomMode}
+                    data-testid="qbank-random-value"
+                    className="w-20 h-8 text-sm"
+                />
+                {randomMode === "percent" && <span className="text-xs" style={{ color: "var(--text-muted)" }}>%</span>}
+                <span className="text-xs" style={{ color: "var(--text-muted)" }}>de {total} que coinciden</span>
+                <button
+                    onClick={practiceRandom}
+                    disabled={!randomMode || practicing || total === 0}
+                    data-testid="qbank-random-practice"
+                    className="ml-auto btn-primary flex items-center gap-2 text-xs disabled:opacity-50"
+                >
+                    {practicing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Shuffle className="w-3.5 h-3.5" />}
+                    {randomMode === "percent" ? `Practicar ${randomValue}% aleatorias` : `Practicar ${randomValue} aleatorias`}
+                </button>
+            </div>
+
+            {/* Barra de acción de selección */}
+            {hasSelection && (
+                <div
+                    className="card-organic p-3 mb-4 flex flex-wrap items-center gap-3"
+                    style={{ borderColor: "var(--brand)", background: "#fdf1ea" }}
+                    data-testid="qbank-selection-bar"
+                >
+                    <span className="text-sm font-medium" style={{ color: "var(--brand)" }} data-testid="qbank-selection-count">
+                        {selectAllFiltered
+                            ? `Todas las que coinciden (${total})`
+                            : `${selectedIds.size} ${selectedIds.size === 1 ? "seleccionada" : "seleccionadas"}`}
+                    </span>
+                    {canSelectAllFiltered && (
+                        <button
+                            onClick={() => { setSelectAllFiltered(true); }}
+                            data-testid="qbank-select-all-filtered"
+                            className="text-xs hover:underline"
+                            style={{ color: "var(--brand)" }}
+                        >
+                            Seleccionadas las {items.length} de esta página. Seleccionar las {total} que coinciden con el filtro.
+                        </button>
+                    )}
+                    <div className="ml-auto flex items-center gap-2">
+                        <button
+                            onClick={practiceSelection}
+                            disabled={practicing}
+                            data-testid="qbank-practice-selected"
+                            className="btn-primary flex items-center gap-2 text-xs disabled:opacity-50"
+                        >
+                            {practicing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                            Practicar selección
+                        </button>
+                        <button
+                            onClick={clearSelection}
+                            data-testid="qbank-clear-selection"
+                            className="text-xs flex items-center gap-1 px-2 py-1.5 rounded hover:bg-white"
+                            style={{ color: "var(--text-secondary)" }}
+                        >
+                            <X className="w-3.5 h-3.5" /> Limpiar
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Contador */}
             <div className="flex items-center justify-between mb-3 text-sm" style={{ color: "var(--text-muted)" }}>
                 <span data-testid="qbank-count">
@@ -331,22 +509,38 @@ export default function QuestionBank() {
                     </p>
                 </div>
             ) : (
-                <div className="space-y-3">
-                    {items.map((q) => (
-                        <QuestionCard
-                            key={q.id}
-                            q={q}
-                            subjectName={subjectName[q.subject_id]}
-                            topicName={topicName[q.topic_id] || q.topic_name}
-                            pdfLabel={q.pdf_source_id ? pdfName[q.pdf_source_id] : null}
-                            onFav={() => toggleFav(q.id)}
-                            onDiff={() => toggleDiff(q.id)}
-                            onDelete={() => setToDelete(q)}
-                            onEdit={() => setEditing(q)}
-                            onGoTopic={() => navigate(`/temas/${q.topic_id}`)}
+                <>
+                    {/* Cabecera de lista: seleccionar toda la página (tri-estado) */}
+                    <div className="flex items-center gap-2 mb-2 px-1">
+                        <Checkbox
+                            checked={headerCheck}
+                            onCheckedChange={toggleSelectPage}
+                            data-testid="qbank-select-page"
+                            aria-label="Seleccionar todas las de esta página"
                         />
-                    ))}
-                </div>
+                        <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                            {selectedIds.size > 0 ? `${selectedIds.size} seleccionadas` : "Seleccionar todas las de esta página"}
+                        </span>
+                    </div>
+                    <div className="space-y-3">
+                        {items.map((q) => (
+                            <QuestionCard
+                                key={q.id}
+                                q={q}
+                                selected={selectedIds.has(q.id)}
+                                onToggleSelect={toggleSelect}
+                                subjectName={subjectName[q.subject_id]}
+                                topicName={topicName[q.topic_id] || q.topic_name}
+                                pdfLabel={q.pdf_source_id ? pdfName[q.pdf_source_id] : null}
+                                onFav={() => toggleFav(q.id)}
+                                onDiff={() => toggleDiff(q.id)}
+                                onDelete={() => setToDelete(q)}
+                                onEdit={() => setEditing(q)}
+                                onGoTopic={() => navigate(`/temas/${q.topic_id}`)}
+                            />
+                        ))}
+                    </div>
+                </>
             )}
 
             {/* Paginación */}
@@ -438,13 +632,23 @@ export default function QuestionBank() {
     );
 }
 
-function QuestionCard({ q, subjectName, topicName, pdfLabel, onFav, onDiff, onDelete, onEdit, onGoTopic }) {
+function QuestionCard({ q, selected, onToggleSelect, subjectName, topicName, pdfLabel, onFav, onDiff, onDelete, onEdit, onGoTopic }) {
     const answered = q.times_answered || 0;
     const acc = answered ? Math.round((q.times_correct / answered) * 100) : null;
     return (
-        <div className="card-organic p-5 fade-up" data-testid={`qbank-question-${q.id}`}>
+        <div
+            className="card-organic p-5 fade-up"
+            data-testid={`qbank-question-${q.id}`}
+            style={selected ? { borderColor: "var(--brand)", background: "#fff9f5" } : undefined}
+        >
             <div className="flex items-start justify-between gap-3 mb-2">
                 <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    <Checkbox
+                        checked={selected}
+                        onCheckedChange={() => onToggleSelect(q.id)}
+                        data-testid={`qbank-select-${q.id}`}
+                        aria-label="Seleccionar pregunta"
+                    />
                     <span className="text-[10px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm font-bold" style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}>
                         {q.question_type === "tf" ? "V/F" : q.question_type === "dev" ? "Desarrollo" : `${q.num_options} opc`}
                     </span>
