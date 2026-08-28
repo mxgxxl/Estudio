@@ -64,6 +64,10 @@ export default function QuestionBank() {
     const [editing, setEditing] = useState(null);
     const [createOpen, setCreateOpen] = useState(false);
     const [topicStepperOpen, setTopicStepperOpen] = useState(false);
+    // Fuerza una recarga del listado cuando los filtros NO cambian (crear una
+    // pregunta en el tema ya filtrado): sin esto el efecto de `load` no se
+    // dispara y la recién creada no aparecería.
+    const [refreshTick, setRefreshTick] = useState(0);
 
     // Selección granular para practicar.
     const [selectedIds, setSelectedIds] = useState(() => new Set()); // marcadas por checkbox
@@ -125,7 +129,9 @@ export default function QuestionBank() {
         } finally {
             setLoading(false);
         }
-    }, [filters, sort, page]);
+        // `refreshTick` no se usa en el cuerpo: es solo un disparador de recarga.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filters, sort, page, refreshTick]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -153,6 +159,27 @@ export default function QuestionBank() {
         setPdfId("");
         setQType("");
         setStatus("all");
+    };
+
+    // Al crear una pregunta a mano: enfoca los filtros en SU tema (asignatura +
+    // tema, el resto a "todos" y el buscador vacío). El diálogo del Banco no es
+    // `fixedTopic`, así que la pregunta puede nacer en un tema distinto al
+    // filtrado; sin esto el listado recargaba pero la nueva quedaba fuera del
+    // filtro activo (éxito silencioso). `refreshTick` cubre el caso en que los
+    // filtros ya apuntaban ahí y por tanto no cambian.
+    const handleQuestionCreated = async (created) => {
+        if (created) {
+            await loadCatalogs(); // su tema debe existir como opción antes de fijarlo
+            setSubjectId(created.subject_id || "");
+            setTopicId(created.topic_id || "");
+            setPdfId("");
+            setQType("");
+            setStatus("all");
+            setSearch("");
+            setDebouncedSearch(""); // sin esperar al debounce: filtros coherentes ya
+            setPage(1);
+        }
+        setRefreshTick((n) => n + 1);
     };
 
     const patchItem = (qid, fields) =>
@@ -616,7 +643,7 @@ export default function QuestionBank() {
                 defaultSubjectId={subjectId || null}
                 defaultTopicId={topicId || null}
                 defaultPdfId={pdfId && pdfId !== "none" ? pdfId : null}
-                onCreated={() => load()}
+                onCreated={handleQuestionCreated}
             />
 
             {/* Stepper "Nuevo tema" (última opción del desplegable de temas).
