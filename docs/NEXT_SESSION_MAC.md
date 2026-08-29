@@ -5,7 +5,7 @@
 
 ## Estado actual
 - Rama de integración: saas-oposiciones @ b17a937 (local == origin)
-- Suite: 206 tests en verde (pytest backend/tests/)
+- Suite: 213 tests en verde (pytest backend/tests/)
 - main: historia NO relacionada (raíz a731aaf), sin este trabajo. No mergeable.
   Tratarla como historia muerta; saas-oposiciones es la rama real.
 - 2026-08-29 · ensure_indices endurecido: fail-fast en el arranque, con 3 reintentos
