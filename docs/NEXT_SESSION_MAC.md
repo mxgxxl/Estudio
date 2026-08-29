@@ -8,6 +8,10 @@
 - Suite: 206 tests en verde (pytest backend/tests/)
 - main: historia NO relacionada (raíz a731aaf), sin este trabajo. No mergeable.
   Tratarla como historia muerta; saas-oposiciones es la rama real.
+- 2026-08-29 · ensure_indices endurecido: fail-fast en el arranque, con 3 reintentos
+  acotados antes de rendirse (rama fix/startup-fail-fast). Es hardening técnico a
+  raíz del incidente del 28-08, no una decisión de producto: por eso NO figura en
+  docs/PRODUCT_DECISIONS.md.
 
 ## Cerrado en Flujos 5+6 (autoría manual de preguntas)
 - POST /api/questions (272925f) + pdf_source_id opcional (895c20c)
