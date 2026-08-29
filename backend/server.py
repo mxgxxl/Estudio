@@ -1479,6 +1479,44 @@ async def delete_pdf(pdf_id: str, current_user: dict = Depends(get_current_user)
     return {"ok": True}
 
 
+class RenamePdfReq(BaseModel):
+    """Renombrado de un PDF. Solo el nombre: el rename es SINGLE-SOURCE."""
+    filename: str
+
+
+# Tope de longitud del nombre; generoso pero acotado (evita nombres absurdos
+# que revienten la UI de las tarjetas).
+PDF_FILENAME_MAX = 200
+
+
+@api.patch("/pdfs/{pdf_id}")
+async def rename_pdf(pdf_id: str, req: RenamePdfReq, current_user: dict = Depends(get_current_user)):
+    """Renombra un PDF. SINGLE-SOURCE: solo se escribe `pdfs.filename`; todo lo
+    demás (el `pdf_filename` de /summaries, las tarjetas del banco, TopicDetail)
+    lo deriva en lectura de esta misma colección, así que no hay nada que
+    propagar ni desnormalizar.
+
+    NO toca `text`, `char_count`, `created_at` ni los ids, ni `pdf_links`,
+    `questions`, `flashcards` o `summaries`."""
+    name = (req.filename or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="El nombre no puede estar vacío")
+    if len(name) > PDF_FILENAME_MAX:
+        raise HTTPException(
+            status_code=422,
+            detail=f"El nombre no puede superar los {PDF_FILENAME_MAX} caracteres",
+        )
+
+    # Acotado al usuario: un PDF ajeno responde 404 igual que uno inexistente
+    # (no revela su existencia).
+    res = await db.pdfs.update_one(
+        {"id": pdf_id, "user_id": current_user["id"]}, {"$set": {"filename": name}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="PDF no encontrado")
+    return {"ok": True}
+
+
 @api.post("/topics/{topic_id}/pdfs/upload")
 async def add_pdf_to_topic(topic_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     uid = current_user["id"]

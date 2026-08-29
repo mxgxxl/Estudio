@@ -96,6 +96,10 @@ export const createTopic = (subjectId, data) =>
 export const regenerateFromPdf = (pdfId, payload) =>
     api.post(`/pdfs/${pdfId}/regenerate`, payload, { timeout: 300000 }).then((r) => r.data);
 export const deletePdf = (pdfId) => api.delete(`/pdfs/${pdfId}`).then((r) => r.data);
+// Renombrar un PDF. SINGLE-SOURCE: solo cambia `pdfs.filename`; el resto de
+// pantallas (Resúmenes, TopicDetail, banco) derivan el nombre en lectura.
+export const renamePdf = (pdfId, filename) =>
+    api.patch(`/pdfs/${pdfId}`, { filename }).then((r) => r.data);
 export const addPdfToTopic = (topicId, formData) =>
     api
         .post(`/topics/${topicId}/pdfs/upload`, formData, {

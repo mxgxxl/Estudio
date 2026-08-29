@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Library as LibraryIcon, Upload, FileText, Trash2, Loader2, Search } from "lucide-react";
+import { Library as LibraryIcon, Upload, FileText, Trash2, Loader2, Search, Pencil } from "lucide-react";
 import { toast } from "sonner";
-import { listPdfs, uploadPdf, deletePdf, listTopics } from "@/lib/api";
+import { listPdfs, uploadPdf, deletePdf, renamePdf, listTopics } from "@/lib/api";
 
 export default function Library() {
     const [pdfs, setPdfs] = useState(null);
@@ -10,6 +10,10 @@ export default function Library() {
     const [uploading, setUploading] = useState(false);
     const [pdfToDelete, setPdfToDelete] = useState(null);
     const [deleting, setDeleting] = useState(false);
+    // Renombrado: el PDF en edición y el nombre que se está escribiendo.
+    const [pdfToRename, setPdfToRename] = useState(null);
+    const [renameValue, setRenameValue] = useState("");
+    const [renaming, setRenaming] = useState(false);
     const fileRef = useRef(null);
 
     const load = useCallback(async () => {
@@ -61,6 +65,38 @@ export default function Library() {
             toast.error(err?.response?.data?.detail || "No se pudo eliminar el PDF");
         } finally {
             setDeleting(false);
+        }
+    };
+
+    const openRename = (p) => {
+        setPdfToRename(p);
+        setRenameValue(p.filename);
+    };
+
+    const confirmRename = async (e) => {
+        e?.preventDefault();
+        const p = pdfToRename;
+        if (!p) return;
+        const name = renameValue.trim();
+        if (!name) {
+            toast.error("El nombre no puede estar vacío");
+            return;
+        }
+        if (name === p.filename) {   // sin cambios: cerrar sin llamar a la API
+            setPdfToRename(null);
+            return;
+        }
+        setRenaming(true);
+        try {
+            await renamePdf(p.id, name);
+            toast.success("PDF renombrado");
+            setPdfs((ps) => ps.map((x) => (x.id === p.id ? { ...x, filename: name } : x)));
+            setPdfToRename(null);
+        } catch (err) {
+            // No cerramos el diálogo: el usuario corrige y reintenta.
+            toast.error(err?.response?.data?.detail || "No se pudo renombrar el PDF");
+        } finally {
+            setRenaming(false);
         }
     };
 
@@ -192,6 +228,16 @@ export default function Library() {
                                                 </div>
                                             </div>
                                         </div>
+                                        <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => openRename(p)}
+                                            data-testid={`library-rename-${p.id}`}
+                                            title="Renombrar PDF"
+                                            className="p-1.5 rounded hover:bg-[color:var(--bg-secondary)] shrink-0"
+                                        >
+                                            <Pencil className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
+                                        </button>
                                         <button
                                             type="button"
                                             onClick={() => setPdfToDelete(p)}
@@ -201,12 +247,69 @@ export default function Library() {
                                         >
                                             <Trash2 className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
                                         </button>
+                                        </div>
                                     </div>
                                 );
                             })}
                         </div>
                     )}
                 </>
+            )}
+
+            {pdfToRename && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                    style={{ background: "rgba(35,33,31,0.45)" }}
+                    data-testid="library-rename-dialog"
+                >
+                    <div className="card-organic w-full max-w-md fade-up" style={{ background: "white" }}>
+                        <div className="p-5 border-b" style={{ borderColor: "var(--border)" }}>
+                            <h3 className="font-display text-xl font-bold">Renombrar PDF</h3>
+                            <p className="text-sm mt-1 truncate" style={{ color: "var(--text-muted)" }}>
+                                {pdfToRename.filename}
+                            </p>
+                        </div>
+                        <form onSubmit={confirmRename} className="p-5 space-y-4">
+                            <div>
+                                <label className="label-eyebrow block mb-1.5">Nombre</label>
+                                <input
+                                    type="text"
+                                    value={renameValue}
+                                    onChange={(e) => setRenameValue(e.target.value)}
+                                    disabled={renaming}
+                                    autoFocus
+                                    maxLength={200}
+                                    data-testid="library-rename-input"
+                                    className="w-full border rounded-md px-3 py-2 text-sm"
+                                    style={{ borderColor: "var(--border)" }}
+                                />
+                                <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                                    Solo cambia el nombre. Los temas, las preguntas y el resumen de este
+                                    PDF se conservan.
+                                </p>
+                            </div>
+                            <div className="flex gap-3 pt-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setPdfToRename(null)}
+                                    disabled={renaming}
+                                    className="flex-1 px-4 py-2.5 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)]"
+                                    style={{ borderColor: "var(--border)" }}
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={renaming || !renameValue.trim()}
+                                    data-testid="library-rename-save"
+                                    className="btn-primary flex-1 flex items-center justify-center gap-2 text-sm disabled:opacity-60"
+                                >
+                                    {renaming ? <><Loader2 className="w-4 h-4 animate-spin" /> Guardando…</> : "Guardar"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             )}
 
             {pdfToDelete && (
