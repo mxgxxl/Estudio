@@ -8,6 +8,10 @@
 - Suite: 206 tests en verde (pytest backend/tests/)
 - main: historia NO relacionada (raíz a731aaf), sin este trabajo. No mergeable.
   Tratarla como historia muerta; saas-oposiciones es la rama real.
+- 2026-08-29 · ensure_indices endurecido: fail-fast en el arranque, con 3 reintentos
+  acotados antes de rendirse (rama fix/startup-fail-fast). Es hardening técnico a
+  raíz del incidente del 28-08, no una decisión de producto: por eso NO figura en
+  docs/PRODUCT_DECISIONS.md.
 
 ## Cerrado en Flujos 5+6 (autoría manual de preguntas)
 - POST /api/questions (272925f) + pdf_source_id opcional (895c20c)
@@ -42,4 +46,6 @@ Orden obligatorio: desplegar b17a937 en staging → puerta → $unset.
 ## Frentes siguientes (sin orden de compromiso)
 - Deuda: EditQuestionDialog/CreateQuestionDialog duplican campos → extraer QuestionFields.
 - Mejoras biblioteca: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
+- Visor de PDF: necesario (M, 2026-08-29); pendiente decidir almacenamiento
+  del original → docs/PRODUCT_DECISIONS.md.
 - Resolver main (historia paralela): decidir borrado definitivo cuando nada lo referencie.
