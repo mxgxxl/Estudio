@@ -3271,8 +3271,18 @@ else:
     logger.info("[CORS] explicit origins=%s", _explicit_origins)
 
 
-@app.on_event("startup")
+# Reintentos del arranque: acotados y parametrizables (los tests inyectan valores
+# reducidos y un `sleep` falso para recorrer el camino de fallo sin esperas reales).
+STARTUP_INDEX_ATTEMPTS = int(os.environ.get("STARTUP_INDEX_ATTEMPTS", "3"))
+STARTUP_INDEX_BACKOFF_SECONDS = float(os.environ.get("STARTUP_INDEX_BACKOFF_SECONDS", "2"))
+
+
 async def ensure_indices():
+    """Crea los índices. PROPAGA el error si no puede: un backend sin sus índices
+    (p. ej. sin el único de `users.email`) es peor que uno que no arranca, porque
+    admite datos corruptos —emails duplicados— sin que nadie se entere. Incidente
+    del 2026-08-28: credenciales de Atlas inválidas, WARNING silencioso y servicio
+    "arrancado" con todas las operaciones de BD dando 500."""
     try:
         await db.users.create_index("id", unique=True)
         await db.users.create_index("email", unique=True)
@@ -3347,8 +3357,49 @@ async def ensure_indices():
         except Exception:
             pass
         logger.info("MongoDB indices ensured.")
-    except Exception as e:
-        logger.warning("ensure_indices failed: %s", e)
+    except Exception:
+        # Traza completa: el WARNING de una línea del incidente no permitía ver
+        # que la causa era de credenciales/conexión.
+        logger.exception("ensure_indices failed: no se pudieron crear los índices")
+        raise
+
+
+async def ensure_indices_with_retry(attempts=None, backoff_seconds=None, sleep=None):
+    """Ejecuta `ensure_indices` con reintentos ACOTADOS (nunca en bucle infinito).
+
+    Un fallo transitorio de red al arrancar no debe tumbar el servicio, pero uno
+    persistente SÍ: si se agotan los intentos, lanza y el arranque falla (uvicorn
+    sale y Railway reinicia / lo marca no saludable). `attempts`, `backoff_seconds`
+    y `sleep` son inyectables para poder testear el camino de fallo sin esperas."""
+    attempts = STARTUP_INDEX_ATTEMPTS if attempts is None else attempts
+    attempts = max(1, int(attempts))
+    backoff = STARTUP_INDEX_BACKOFF_SECONDS if backoff_seconds is None else backoff_seconds
+    sleeper = asyncio.sleep if sleep is None else sleep
+
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await ensure_indices()
+            return
+        except Exception as e:
+            last_error = e
+            logger.error("ensure_indices: intento %d/%d fallido: %s", attempt, attempts, e)
+            if attempt < attempts:
+                await sleeper(backoff)
+
+    logger.critical(
+        "ensure_indices: agotados %d intentos; el arranque FALLA a propósito "
+        "(un backend sin índices puede corromper datos en silencio).", attempts
+    )
+    raise RuntimeError(
+        f"No se pudieron crear los índices de MongoDB tras {attempts} intentos"
+    ) from last_error
+
+
+@app.on_event("startup")
+async def startup_ensure_indices():
+    """Punto de arranque: si los índices no se pueden crear, NO arrancamos."""
+    await ensure_indices_with_retry()
 
 
 @app.on_event("shutdown")
