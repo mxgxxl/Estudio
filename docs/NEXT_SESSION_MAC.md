@@ -42,4 +42,6 @@ Orden obligatorio: desplegar b17a937 en staging → puerta → $unset.
 ## Frentes siguientes (sin orden de compromiso)
 - Deuda: EditQuestionDialog/CreateQuestionDialog duplican campos → extraer QuestionFields.
 - Mejoras biblioteca: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
+- Visor de PDF: necesario (M, 2026-08-29); pendiente decidir almacenamiento
+  del original → docs/PRODUCT_DECISIONS.md.
 - Resolver main (historia paralela): decidir borrado definitivo cuando nada lo referencie.
