@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
-import { X, Loader2, Check } from "lucide-react";
+import { X, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { editQuestion } from "@/lib/api";
+import QuestionFields from "@/components/QuestionFields";
 
-// Edición simple de una pregunta (enunciado, opciones + correcta, explicación /
+// Edición de una pregunta (enunciado, opciones + correcta, explicación /
 // respuesta modelo). Reutiliza PATCH /questions/{id}. Se abre cuando `question`
 // no es null; devuelve los campos actualizados por onSaved para refrescar la lista.
+// Los campos los pinta `QuestionFields`, compartido con CreateQuestionDialog: de
+// ahí vienen el añadir/quitar opciones en mcq y el par Verdadero/Falso. El TIPO se
+// muestra pero NO se puede cambiar (no se pasa onQuestionTypeChange): cambiarlo en
+// una pregunta ya creada dejaría su schema incoherente.
 export default function EditQuestionDialog({ question, onClose, onSaved, notice }) {
     const [text, setText] = useState("");
     const [options, setOptions] = useState([]);
@@ -26,9 +31,6 @@ export default function EditQuestionDialog({ question, onClose, onSaved, notice 
     if (!question) return null;
 
     const isDev = question.question_type === "dev";
-    const isTf = question.question_type === "tf";
-
-    const setOption = (i, val) => setOptions((prev) => prev.map((o, k) => (k === i ? val : o)));
 
     const onSubmit = async (e) => {
         e.preventDefault();
@@ -95,68 +97,19 @@ export default function EditQuestionDialog({ question, onClose, onSaved, notice 
                         />
                     </div>
 
-                    {!isDev && (
-                        <div>
-                            <label className="label-eyebrow block mb-1.5">
-                                Opciones {isTf ? "(marca la correcta)" : "(marca la correcta)"}
-                            </label>
-                            <div className="space-y-2">
-                                {options.map((opt, i) => (
-                                    <div key={i} className="flex items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => setCorrectIndex(i)}
-                                            data-testid={`edit-correct-${i}`}
-                                            title="Marcar como correcta"
-                                            className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 border"
-                                            style={{
-                                                borderColor: correctIndex === i ? "var(--brand)" : "var(--border)",
-                                                background: correctIndex === i ? "var(--brand)" : "white",
-                                            }}
-                                        >
-                                            {correctIndex === i && <Check className="w-3.5 h-3.5 text-white" />}
-                                        </button>
-                                        <input
-                                            type="text"
-                                            value={opt}
-                                            onChange={(e) => setOption(i, e.target.value)}
-                                            disabled={saving || isTf}
-                                            className="flex-1 border rounded-md px-3 py-2 text-sm disabled:bg-[color:var(--bg-secondary)]"
-                                            style={{ borderColor: "var(--border)" }}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    {isDev && (
-                        <div>
-                            <label className="label-eyebrow block mb-1.5">Respuesta modelo</label>
-                            <textarea
-                                value={modelAnswer}
-                                onChange={(e) => setModelAnswer(e.target.value)}
-                                disabled={saving}
-                                rows={4}
-                                className="w-full border rounded-md px-3 py-2 text-sm resize-none"
-                                style={{ borderColor: "var(--border)" }}
-                            />
-                        </div>
-                    )}
-
-                    <div>
-                        <label className="label-eyebrow block mb-1.5">
-                            Explicación <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(opcional)</span>
-                        </label>
-                        <textarea
-                            value={explanation}
-                            onChange={(e) => setExplanation(e.target.value)}
-                            disabled={saving}
-                            rows={2}
-                            className="w-full border rounded-md px-3 py-2 text-sm resize-none"
-                            style={{ borderColor: "var(--border)" }}
-                        />
-                    </div>
+                    <QuestionFields
+                        questionType={question.question_type}
+                        options={options}
+                        onOptionsChange={setOptions}
+                        correctIndex={correctIndex}
+                        onCorrectIndexChange={setCorrectIndex}
+                        modelAnswer={modelAnswer}
+                        onModelAnswerChange={setModelAnswer}
+                        explanation={explanation}
+                        onExplanationChange={setExplanation}
+                        disabled={saving}
+                        testIdPrefix="edit"
+                    />
 
                     <div className="flex gap-3 pt-2">
                         <button type="button" onClick={onClose} disabled={saving} className="flex-1 px-4 py-2.5 rounded-md border font-medium text-sm hover:bg-[color:var(--bg-secondary)]" style={{ borderColor: "var(--border)" }}>
