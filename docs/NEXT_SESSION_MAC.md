@@ -48,4 +48,6 @@ Orden obligatorio: desplegar b17a937 en staging → puerta → $unset.
 - Mejoras biblioteca: renombrar/previsualizar PDFs, etiquetas/carpetas, acciones en masa.
 - Visor de PDF: necesario (M, 2026-08-29); pendiente decidir almacenamiento
   del original → docs/PRODUCT_DECISIONS.md.
+- Auditoría UI disponible en docs/UI_AUDIT.md: hallazgos con evidencia archivo:línea,
+  priorizados (quick wins → fundacionales → rediseños) y con decisiones pendientes de M.
 - Resolver main (historia paralela): decidir borrado definitivo cuando nada lo referencie.
