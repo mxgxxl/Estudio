@@ -1676,6 +1676,15 @@ async def edit_question(question_id: str, req: EditQuestionReq, current_user: di
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
+    # `num_options` se DERIVA de las opciones, no se acepta del cliente (el
+    # contrato de EditQuestionReq no cambia). Desde que la edición permite
+    # añadir/quitar opciones, sin esto el campo quedaba con el valor antiguo y
+    # las tarjetas del Banco/TopicDetail seguían mostrando "N opc" desfasado.
+    # En todos los caminos de creación se cumple ya num_options == len(options)
+    # (mcq: n; tf: 2 con ["Verdadero","Falso"]; dev: 0 con []), así que derivar
+    # mantiene la misma invariante.
+    if "options" in fields:
+        fields["num_options"] = len(fields["options"])
     res = await db.questions.update_one({"id": question_id, "user_id": current_user["id"]}, {"$set": fields})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Pregunta no encontrada")
